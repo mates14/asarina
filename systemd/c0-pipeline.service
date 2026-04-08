@@ -1,0 +1,55 @@
+[Unit]
+Description=Automated Astronomical Image Processing Pipeline (C0)
+Documentation=file:///home/mates/pipeline/README.md
+After=network.target network-online.target
+Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=notify
+User=mates
+Group=mates
+WorkingDirectory=/home/mates/pipeline
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+ExecStart=/home/mates/pipeline/c0_pipeline.py --systemd --run-transients --camera-pattern C0
+#ExecStart=/home/mates/pipeline/c0_pipeline.py --systemd --camera-pattern C0
+ExecReload=/bin/kill -HUP $MAINPID
+NoNewPrivileges=false
+
+# Restart policy
+Restart=always
+RestartSec=10
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+# Watchdog (restart if no ping within 120s)
+WatchdogSec=120
+NotifyAccess=main
+
+# Resource limits
+MemoryMax=2G
+CPUQuota=80%
+
+# Security hardening
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=/home/mates/phdb /home/mates/png /tmp /images
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Environment
+Environment=PYTHONPATH=/home/mates/pipeline:/home/mates/pyrt
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/mates/bin:/home/mates/pipeline:/usr/local/bin:/usr/bin:/bin
+Environment=TERM=vt100
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=astro-pipeline-c0
+
+[Install]
+WantedBy=multi-user.target

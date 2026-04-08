@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asarina"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.20",
+    "astropy>=5.0",
+    "scipy>=1.7",
+    # pyrt must be installed separately
+]
+
+[project.scripts]
+asarina-make-calib  = "asarina.calib.make_calib:main"
+asarina-proc-images = "asarina.pipeline.proc_images:main"
+asarina-pipeline    = "asarina.pipeline.c0_pipeline:main"
+asarina-imgproc     = "asarina.pipeline.imgproc:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["asarina*"]
+
+[tool.setuptools.package-data]
+"asarina.calib" = ["*.sh"]

@@ -1,0 +1,102 @@
+#!/bin/bash
+# Simple IRAF wrapper to combine flat frames.
+# This script handles at most 150 frames.
+# For larger sets, use mixflat.py which calls this script in parallel.
+#
+# Usage: iraf_combine_flat.sh output.fits input1.fits input2.fits ...
+
+set -e
+
+if [ -z "$1" ]; then
+    echo "Usage: iraf_combine_flat.sh output.fits input1.fits input2.fits ..."
+    exit 1
+fi
+
+if [ -e "$1" ]; then
+    echo "Error: output file $1 already exists"
+    exit 1
+fi
+
+result=$1
+shift
+
+N=$#
+if [ $N -gt 150 ]; then
+    echo "Error: this script handles at most 150 frames (got $N)"
+    echo "Use mixflat.py for larger sets"
+    exit 1
+fi
+
+if [ $N -eq 0 ]; then
+    echo "Error: no input files provided"
+    exit 1
+fi
+
+# Create temp directory (use ~/tmp for space)
+user_tmp="$HOME/tmp"
+mkdir -p "$user_tmp"
+tempdir=$(mktemp -d "$user_tmp/iraf_flat.XXXXXX")
+trap "rm -rf $tempdir" EXIT
+
+# Copy files to temp directory (IRAF workaround)
+cp "$@" "$tempdir/"
+cd "$tempdir"
+
+# Isolate IRAF state to avoid conflicts when running in parallel
+export HOME="$tempdir"
+
+# Find IRAF command (cl or irafcl depending on installation)
+if command -v cl &>/dev/null; then
+    IRAF_CL=cl
+elif command -v irafcl &>/dev/null; then
+    IRAF_CL=irafcl
+else
+    echo "Error: IRAF not found (tried 'cl' and 'irafcl')" >&2
+    exit 1
+fi
+
+# Create file list with basenames
+for f in "$@"; do
+    basename "$f"
+done > files.lst
+
+# Get image dimensions from first file
+first_file=$(head -1 files.lst)
+eval $(fitsheader -r NAXIS1 NAXIS2 "$first_file")
+
+# Run IRAF - combine flats (with timeout to prevent zombie ecl.e processes)
+echo 'images
+imsurfit @files.lst @files.lst//-f 3 3 xmedian=12 ymedian=12 type_ou=fit
+imcombine @files.lst//-f ave.fits combine=average
+imarith @files.lst / @files.lst//-f @files.lst//-r
+imcombine @files.lst//-r res.fits combine=median
+imarith ave.fits * res.fits flat.fits
+logout
+' | timeout -s KILL 1200 $IRAF_CL
+
+# Get mode of central 128x128 region
+mode=$(echo 'images
+imstat flat.fits['$((NAXIS1/2-63)):$((NAXIS1/2+64)),$((NAXIS2/2-63)):$((NAXIS2/2+64))'] fields=mode
+logout
+' | timeout -s KILL 60 $IRAF_CL 2>/dev/null | awk 'a==1 {print; a=0;} /MODE/{a=1}')
+
+echo "mode=$mode"
+
+# Normalize by mode
+echo 'images
+imarith flat.fits / '$mode' result.fits
+logout
+' | timeout -s KILL 60 $IRAF_CL
+
+# Kill any orphaned IRAF processes from this script
+pkill -9 -P $$ ecl.e 2>/dev/null || true
+
+# Set header and copy result
+fitsheader -w IMAGETYP=mflat result.fits
+
+# Handle both relative and absolute output paths
+if [[ "$result" = /* ]]; then
+    cp result.fits "$result"
+else
+    cp result.fits "$OLDPWD/$result"
+fi
