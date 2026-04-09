@@ -151,37 +151,42 @@ class PhotometryPipeline:
             return None
         logger.info(f"pyrt-cat2det took {time.time()-t:.3f}s")
 
-        # Photometry + astrometry refit on .det
-        t = time.time()
-        ret = subprocess.run(
-            ["pyrt-dophot", "-m0.5", "-azS1", "-U", ".r3,.p2", "-i2", det_file],
-            cwd=str(temp_dir), capture_output=True, text=True,
-        )
-        elapsed = time.time() - t
-        if ret.returncode != 0:
-            out = (ret.stdout or '').rstrip()
-            err = (ret.stderr or '').rstrip()
-            logger.error(f"pyrt-dophot failed after {elapsed:.3f}s"
-                         + (f"\nstdout:\n{out}" if out else '')
-                         + (f"\nstderr:\n{err}" if err else ''))
-            return None
-        if ret.stdout:
-            logger.debug(f"pyrt-dophot stdout:\n{ret.stdout.rstrip()}")
-        if ret.stderr:
-            logger.debug(f"pyrt-dophot stderr:\n{ret.stderr.rstrip()}")
-        logger.info(f"pyrt-dophot took {elapsed:.3f}s")
+        # Photometry + astrometry refit — first pass on .det, second pass on
+        # the resulting .ecsv to iteratively improve the astrometric solution.
+        for pass_num, input_file in enumerate(
+                (det_file, ecsv_file), start=1):
+            t = time.time()
+            ret = subprocess.run(
+                ["pyrt-dophot", "-m0.5", "-azS1", "-U", ".r3,.p2", "-i2", input_file],
+                cwd=str(temp_dir), capture_output=True, text=True,
+            )
+            elapsed = time.time() - t
+            if ret.returncode != 0:
+                out = (ret.stdout or '').rstrip()
+                err = (ret.stderr or '').rstrip()
+                logger.error(f"pyrt-dophot pass {pass_num} failed after {elapsed:.3f}s"
+                             + (f"\nstdout:\n{out}" if out else '')
+                             + (f"\nstderr:\n{err}" if err else ''))
+                return None
+            if ret.stdout:
+                logger.debug(f"pyrt-dophot pass {pass_num} stdout:\n{ret.stdout.rstrip()}")
+            if ret.stderr:
+                logger.debug(f"pyrt-dophot pass {pass_num} stderr:\n{ret.stderr.rstrip()}")
+            logger.info(f"pyrt-dophot pass {pass_num} took {elapsed:.3f}s")
 
-        if not (temp_dir / ecsv_file).exists():
-            logger.error(f"ECSV {ecsv_file} missing after pyrt-dophot")
-            return None
+            if not (temp_dir / ecsv_file).exists():
+                logger.error(f"ECSV {ecsv_file} missing after pyrt-dophot pass {pass_num}")
+                return None
 
         return ecsv_file
 
     def save_results(self, ecsv_filename: str, temp_dir: Path, ctime: float,
-                     keep_image: bool = False) -> Optional[str]:
+                     keep_image: bool = False) -> Tuple[str, Optional[str]]:
         """Move ECSV and PNG files to their permanent locations.
 
-        Returns the path to the stored ECSV, or None on failure.
+        Returns (ecsv_path, fits_path) where fits_path is the path of the
+        kept calibrated FITS file (only when keep_image=True and the file
+        exists), otherwise None.
         """
         ym = self._get_year_month_code(ctime)
         phdb_dir = self.phdb_root / ym
@@ -196,6 +201,7 @@ class PhotometryPipeline:
         for png in temp_dir.glob("*.png"):
             shutil.move(str(png), str(png_dir / png.name))
 
+        kept_fits = None
         if keep_image:
             updated = ecsv_filename.replace('.ecsv', 'dft.fits')
             src = temp_dir / updated
@@ -203,18 +209,20 @@ class PhotometryPipeline:
                 dst = Path.cwd() / updated
                 shutil.copy2(str(src), str(dst))
                 logger.info(f"Kept calibrated image: {dst}")
+                kept_fits = str(dst)
 
-        return str(dst_ecsv)
+        return str(dst_ecsv), kept_fits
 
     # ------------------------------------------------------------------
     # High-level entry point (used by c0_pipeline)
     # ------------------------------------------------------------------
 
     def process_image(self, image_path: str, force: bool = False,
-                      keep_image: bool = False) -> Optional[str]:
+                      keep_image: bool = False) -> Optional[Tuple[str, Optional[str]]]:
         """Process a single image through the complete pipeline.
 
-        Returns path to the output ECSV, or None on failure.
+        Returns (ecsv_path, fits_path) on success, or None on failure.
+        fits_path is the kept calibrated FITS when keep_image=True, else None.
         """
         image_path = Path(image_path)
         logger.debug(f"××××× {image_path.name} ×××××")
@@ -223,7 +231,7 @@ class PhotometryPipeline:
             existing = self._check_existing_ecsv(str(image_path))
             if existing:
                 logger.info(f"Result already exists: {existing}")
-                return existing
+                return existing, None
 
         ctime = self._get_header_value(str(image_path), 'CTIME')
         if ctime is None:
@@ -254,8 +262,9 @@ class PhotometryPipeline:
         successful = []
         for p in image_paths:
             result = self.process_image(p, force, keep_image)
-            if result:
-                successful.append(result)
+            if result is not None:
+                ecsv_path, _ = result
+                successful.append(ecsv_path)
         logger.info(f"Successfully processed {len(successful)}/{len(image_paths)} images")
         return successful
 

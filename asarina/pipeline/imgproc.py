@@ -13,7 +13,9 @@ Sequence:
   5. print corrwerr to stdout  ← RTS2 archives the raw image after this
   6. dophot photometry pass
   7. save ECSV/PNG results
-  8. locate archived raw by night/camera/filename, update its header
+  8. upload ECSV to database server
+  9. notify transient daemon
+  10. locate archived raw by night/camera/filename, update its header
 """
 
 import os
@@ -38,6 +40,7 @@ warnings.filterwarnings('ignore', category=FITSFixedWarning)
 
 from asarina.pipeline.get_ecsv import PhotometryPipeline
 from asarina.pipeline.pipeline_utils import TransientSearcher
+from asarina.pipeline.c0_pipeline import DatabaseUploader
 from asarina.pipeline.proc_images import CAMERA_CROPS
 from asarina.chip_id import get_camera_id
 
@@ -322,6 +325,8 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="RTS2 imgproc pipeline")
     parser.add_argument('fits_file', help='Raw FITS image')
+    parser.add_argument('--ssh-key', required=True,
+                        help='Path to SSH private key for database upload')
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Show subprocess output and debug logging')
     args = parser.parse_args()
@@ -346,6 +351,7 @@ def main():
         png_root='/home/mates/png',
     )
     temp_dir = Path(tempfile.mkdtemp(prefix='imgproc.'))
+    t_start = time.time()
 
     try:
         # 1. Dark/flat correction
@@ -369,6 +375,7 @@ def main():
 
         # 5. Report to RTS2
         _corrwerr(calibrated, raw_header, chip_id)
+        logger.info(f"corrwerr produced in {time.time() - t_start:.1f}s")
 
         # --- RTS2 reads corrwerr and begins archiving the raw image ---
 
@@ -399,13 +406,19 @@ def main():
         # 7. Save ECSV and PNG to phdb/png (as mates)
         ecsv_path = None
         if ctime is not None:
-            ecsv_path = pipeline.save_results(ecsv, temp_dir, ctime)
+            ecsv_path, _ = pipeline.save_results(ecsv, temp_dir, ctime)
 
-        # 8. Notify transient daemon (as mates, so fnovotny can read the files)
+        # 8. Upload ECSV to database server
+        if ecsv_path is not None:
+            DatabaseUploader(ssh_key=args.ssh_key).upload_ecsv(ecsv_path)
+
+        # 10. Notify transient daemon (as mates, so fnovotny can read the files)
         if ecsv_path is not None:
             dft = temp_dir / fits_file.replace('df.fits', 'dft.fits')
             fits_for_transients = str(dft) if dft.exists() else str(calibrated)
             TransientSearcher().search_transients(ecsv_path, fits_for_transients)
+
+        logger.info(f"imgproc total run time {time.time() - t_start:.1f}s")
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)

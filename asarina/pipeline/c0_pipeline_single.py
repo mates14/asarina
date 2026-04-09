@@ -36,8 +36,8 @@ except ImportError:
 class DatabaseUploader:
     """Handles uploading ECSV files to remote database."""
     
-    def __init__(self, 
-                 ssh_key: str = "/home/mates/det/getdet",
+    def __init__(self,
+                 ssh_key: str,
                  zeus_host: str = "zeus.asu.cas.cz",
                  hog_host: str = "hog.asu.cas.cz",
                  remote_script: str = "/home/mates/ecsv/mk-img.py",
@@ -166,13 +166,14 @@ class TransientSearcher:
 class ProcessingPipeline:
     """Complete processing pipeline from image to database."""
     
-    def __init__(self, 
+    def __init__(self,
                  cleanup_ecsv: bool = True,
                  run_transients: bool = False,
+                 ssh_key: str = None,
                  **kwargs):
-        
+
         self.photometry = PhotometryPipeline(**kwargs)
-        self.uploader = DatabaseUploader()
+        self.uploader = DatabaseUploader(ssh_key=ssh_key)
         self.transient_searcher = TransientSearcher()
         self.cleanup_ecsv = cleanup_ecsv
         self.run_transients = run_transients
@@ -557,32 +558,35 @@ def main():
                        help='Enable systemd integration (journal logging, watchdog, notifications)')
     parser.add_argument('--health-check', action='store_true',
                        help='Print health status and exit')
+    parser.add_argument('--ssh-key', required=True,
+                       help='Path to SSH private key for database upload')
     parser.add_argument('--fast', action='store_true',
                        help='Prefer being less precise and faster')
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Verbose output')
-    
+
     args = parser.parse_args()
-    
+
     # Setup logging
     setup_logging(use_systemd=args.systemd, verbose=args.verbose)
-    
+
     if args.verbose:
         logger.debug("Debug logging enabled")
-    
+
     # Handle health check
     if args.health_check:
         # This could be expanded to check a running instance
         print("Service health check not implemented for standalone execution")
         sys.exit(0)
-    
+
     # Create and run pipeline
     pipeline = AutomatedPipeline(
         use_systemd=args.systemd,
         png_cleanup_days=args.png_cleanup_days,
         cleanup_interval_hours=args.cleanup_interval_hours,
         cleanup_ecsv=not args.no_cleanup,
-        run_transients=args.run_transients
+        run_transients=args.run_transients,
+        ssh_key=args.ssh_key
 #        fast=args.fast
     )
     
