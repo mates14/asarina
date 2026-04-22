@@ -12,7 +12,7 @@ import numpy as np
 from astropy.io import fits
 import scipy.stats as stats
 
-from asarina.chip_id import load_chip_id
+from chip_id import load_chip_id
 
 # Camera-specific crop regions applied after dark/flat correction.
 # FITS section [x1:x2, y1:y2] (1-indexed inclusive) → numpy [y1-1:y2, x1-1:x2]
@@ -33,12 +33,10 @@ class ImageProcessor:
     """Astronomical image processing pipeline for dark/flat calibration."""
     
     def __init__(self, temp_grouping: int = 5, exposure_tolerance: float = 3.0,
-                 calib_root: str = "/home/mates/calib",
                  calib_dir_template: str = "/home/mates/flat{year}/",
                  max_year_search: int = 5):
         self.temp_grouping = temp_grouping
         self.exposure_tolerance = exposure_tolerance
-        self.calib_root = Path(calib_root)
         self.calib_dir_template = calib_dir_template
         self.max_year_search = max_year_search
         self.master_darks = {}
@@ -114,7 +112,7 @@ class ImageProcessor:
 
         # 1. New path: ~/calib/{chip_id}/{year}/
         if self.chip_id:
-            new_path = self.calib_root / self.chip_id / str(year)
+            new_path = Path.home() / 'calib' / self.chip_id / str(year)
             if new_path.exists():
                 logger.info(f"Loading calibration frames from {new_path}")
                 d, f = self._load_fits_dir(new_path)
@@ -280,6 +278,34 @@ class ImageProcessor:
 
         return total_darks, total_flats
     
+    def _parse_ccdsec(self, header: fits.Header) -> Optional[np.s_]:
+        """Return numpy slice for a windowed frame, or None for a full-frame image.
+
+        Reads CCDSEC '[x1:x2,y1:y2]' (1-indexed, FITS column-first convention).
+        Falls back to LTV1/LTV2 + NAXIS when CCDSEC is absent.
+        """
+        import re
+        ccdsec = header.get('CCDSEC')
+        if ccdsec:
+            m = re.match(r'\[(\d+):(\d+),(\d+):(\d+)\]', ccdsec.strip())
+            if not m:
+                logger.warning(f"Cannot parse CCDSEC: {ccdsec}")
+                return None
+            x1, x2, y1, y2 = (int(g) for g in m.groups())
+            return np.s_[y1-1:y2, x1-1:x2]
+
+        ltv1 = header.get('LTV1', 0.0)
+        ltv2 = header.get('LTV2', 0.0)
+        if ltv1 == 0.0 and ltv2 == 0.0:
+            return None
+        naxis1 = header.get('NAXIS1')
+        naxis2 = header.get('NAXIS2')
+        if not naxis1 or not naxis2:
+            return None
+        x1 = int(ltv1) + 1
+        y1 = int(ltv2) + 1
+        return np.s_[y1-1:y1-1+naxis2, x1-1:x1-1+naxis1]
+
     def _find_best_dark_in_memory(self, chip: str, rounded_temp: int, binx: int,
                                    expt: float) -> Optional[str]:
         """Search already-loaded darks for the best match (no I/O)."""
@@ -398,11 +424,18 @@ class ImageProcessor:
                 with fits.open(flat_path) as flat_hdul:
                     flat_data = flat_hdul[0].data
                 
+                # Crop calibration frames to match a windowed science frame
+                window = self._parse_ccdsec(header)
+                if window is not None:
+                    logger.info(f"{output_name}: windowed frame, cropping calibrations to {header.get('CCDSEC', 'LTV-derived')}")
+                    dark_data = dark_data[window]
+                    flat_data = flat_data[window]
+
                 # Perform calibration
                 calibrated = (data - dark_data) / flat_data
 
-                # Crop to active area if defined for this camera
-                crop = CAMERA_CROPS.get(chip)
+                # Crop to active area — only meaningful for full-frame readouts
+                crop = None if window is not None else CAMERA_CROPS.get(chip)
                 if crop is not None:
                     calibrated = calibrated[crop]
                     # crop is (row_slice, col_slice); adjust reference pixel accordingly
