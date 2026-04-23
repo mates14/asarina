@@ -12,7 +12,7 @@ import numpy as np
 from astropy.io import fits
 import scipy.stats as stats
 
-from chip_id import load_chip_id
+from asarina.chip_id import load_chip_id
 
 # Camera-specific crop regions applied after dark/flat correction.
 # FITS section [x1:x2, y1:y2] (1-indexed inclusive) → numpy [y1-1:y2, x1-1:x2]

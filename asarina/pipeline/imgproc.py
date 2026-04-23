@@ -156,6 +156,27 @@ def _copy_wcs_to_raw(calibrated_path: Path, raw_path: Path, chip_id: str,
         return False
 
 
+def _report_fwhm(cat_path: Path, ccd_name: str) -> None:
+    """Read FWHM from the phcat catalog and report it via RTS2 scriptcomm.
+
+    cat_path is the ECSV catalog produced by pyrt-phcat ({base}.cat).
+    The FWHM value is stored in the table metadata under key 'FWHM'.
+    """
+    try:
+        from astropy.table import Table
+        import rts2
+        meta = Table.read(str(cat_path), format='ascii.ecsv').meta
+        fwhm = meta.get('FWHM')
+        if fwhm is None:
+            logger.warning("FWHM not found in phcat catalog metadata")
+            return
+        fwhm = float(fwhm)
+        rts2.Rts2Comm().doubleValue(f'fwhm_{ccd_name}', 'calculated FWHM', fwhm)
+        logger.info(f"FWHM reported: fwhm_{ccd_name}={fwhm:.2f} px")
+    except Exception as e:
+        logger.error(f"Failed to report FWHM: {e}")
+
+
 def _corrwerr(calibrated_path: Path, raw_header: fits.Header,
               chip_id: str) -> None:
     """Compute and print the corrwerr line for RTS2.
@@ -329,6 +350,8 @@ def main():
                         help='Path to SSH private key for database upload')
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Show subprocess output and debug logging')
+    parser.add_argument('-r', '--realtime', action='store_true',
+                        help='Enable real-time web preview generation (do not use during offline reprocessing)')
     args = parser.parse_args()
 
     logging.basicConfig(stream=sys.stderr, format='%(levelname)s %(name)s: %(message)s')
@@ -361,13 +384,20 @@ def main():
         calibrated = temp_dir / fits_file
 
         # 2. Web preview — runs in parallel with solve, does not delay corrwerr
-        threading.Thread(
-            target=_make_web_image, args=(calibrated, ccd_name), daemon=True,
-        ).start()
+        #    Skipped during offline reprocessing to avoid interfering with live observations.
+        if args.realtime:
+            threading.Thread(
+                target=_make_web_image, args=(calibrated, ccd_name), daemon=True,
+            ).start()
 
         # 3. Source detection + solve + initial photometry
         if not pipeline.solve(fits_file, temp_dir):
             sys.exit(1)
+
+        # 3.5. Report FWHM from phcat catalog to RTS2 (real-time only)
+        if args.realtime:
+            cat_path = temp_dir / fits_file.replace('.fits', '.cat')
+            _report_fwhm(cat_path, ccd_name)
 
         # 4. Copy WCS into raw image and release it
         #    No ECSV yet at this point (photometry runs after corrwerr).
