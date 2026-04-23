@@ -34,11 +34,13 @@ class ImageProcessor:
     
     def __init__(self, temp_grouping: int = 5, exposure_tolerance: float = 3.0,
                  calib_dir_template: str = "/home/mates/flat{year}/",
+                 calib_root: str = None,
                  max_year_search: int = 5):
         self.temp_grouping = temp_grouping
         self.exposure_tolerance = exposure_tolerance
         self.calib_dir_template = calib_dir_template
         self.max_year_search = max_year_search
+        self.calib_root = Path(calib_root) if calib_root else Path.home() / 'calib'
         self.master_darks = {}
         self.master_flats = {}
         self.objects = []
@@ -112,7 +114,7 @@ class ImageProcessor:
 
         # 1. New path: ~/calib/{chip_id}/{year}/
         if self.chip_id:
-            new_path = Path.home() / 'calib' / self.chip_id / str(year)
+            new_path = self.calib_root / self.chip_id / str(year)
             if new_path.exists():
                 logger.info(f"Loading calibration frames from {new_path}")
                 d, f = self._load_fits_dir(new_path)
