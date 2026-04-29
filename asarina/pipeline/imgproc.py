@@ -122,8 +122,8 @@ def _copy_wcs_to_raw(calibrated_path: Path, raw_path: Path, chip_id: str,
             if astsigma is None:
                 logger.warning("WCS copy skipped: ASTSIGMA missing from ECSV")
                 return False
-            if float(astsigma) >= 1.0:
-                logger.warning(f"WCS copy skipped: ASTSIGMA={astsigma:.3f} >= 1.0")
+            if float(astsigma) >= 0.5:
+                logger.warning(f"WCS copy skipped: ASTSIGMA={astsigma:.3f} >= 0.5")
                 return False
             if idnum is None or int(idnum) <= 20:
                 logger.warning(f"WCS copy skipped: IDNUM={idnum} <= 20")
