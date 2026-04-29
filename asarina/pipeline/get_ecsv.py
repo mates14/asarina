@@ -126,12 +126,17 @@ class PhotometryPipeline:
 
         return True
 
-    def photometry(self, fits_file: str, temp_dir: Path) -> Optional[str]:
+    def photometry(self, fits_file: str, temp_dir: Path,
+                   sip: int = 1, passes: int = 2) -> Optional[str]:
         """Photometry: catalog matching + dophot with astrometry refit.
 
         Runs pyrt-cat2det to match the catalog to detections, then pyrt-dophot
         on the resulting .det file (which also refits the astrometry).
         Returns the ECSV basename on success, None on failure.
+
+        passes controls the total number of dophot iterations: the first is
+        always on the .det file, all subsequent ones on the .ecsv.
+        sip is the SIP polynomial order passed to pyrt-dophot via -S.
         """
         det_file  = fits_file.replace('.fits', '.det')
         ecsv_file = fits_file.replace('.fits', '.ecsv')
@@ -151,13 +156,14 @@ class PhotometryPipeline:
             return None
         logger.info(f"pyrt-cat2det took {time.time()-t:.3f}s")
 
-        # Photometry + astrometry refit — first pass on .det, second pass on
-        # the resulting .ecsv to iteratively improve the astrometric solution.
-        for pass_num, input_file in enumerate(
-                (det_file, ecsv_file), start=1):
+        # Photometry + astrometry refit over N passes: first pass on .det,
+        # remaining passes on .ecsv to iteratively improve the solution.
+        pass_inputs = [det_file] + [ecsv_file] * (passes - 1)
+        for pass_num, input_file in enumerate(pass_inputs, start=1):
             t = time.time()
             ret = subprocess.run(
-                ["pyrt-dophot", "-m0.5", "-azS1", "-U", ".r3,.p2", "-i2", input_file],
+                ["pyrt-dophot", "-m0.5", "-az", f"-S{sip}",
+                 "-U", ".r3,.p2", "-i2", "--max-stars", "1000", input_file],
                 cwd=str(temp_dir), capture_output=True, text=True,
             )
             elapsed = time.time() - t
@@ -177,6 +183,22 @@ class PhotometryPipeline:
             if not (temp_dir / ecsv_file).exists():
                 logger.error(f"ECSV {ecsv_file} missing after pyrt-dophot pass {pass_num}")
                 return None
+
+        # Quality check: reject poor astrometric solutions before saving anything.
+        from astropy.table import Table
+        meta = Table.read(str(temp_dir / ecsv_file), format='ascii.ecsv').meta
+        astsigma = meta.get('ASTSIGMA')
+        idnum    = meta.get('IDNUM')
+        if astsigma is None:
+            logger.error("ASTSIGMA missing from ECSV — rejecting solution")
+            return None
+        if float(astsigma) >= 1.0:
+            logger.error(f"ASTSIGMA={float(astsigma):.3f} >= 1.0 — rejecting solution")
+            return None
+        if idnum is None or int(idnum) <= 20:
+            logger.error(f"IDNUM={idnum} <= 20 — rejecting solution")
+            return None
+        logger.info(f"Solution quality ok: ASTSIGMA={float(astsigma):.3f} IDNUM={idnum}")
 
         return ecsv_file
 

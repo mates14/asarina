@@ -6,6 +6,7 @@ Invoked by the RTS2 imgproc daemon with the raw image path as the sole argument.
 Outputs a single corrwerr line to stdout for RTS2; everything else goes to stderr.
 
 Sequence:
+  0. (SBT) patch missing LTV1/2 windowing keywords
   1. dark/flat correct raw image
   2. generate web preview from calibrated image
   3. phcat + dophot solve pass on calibrated image
@@ -42,6 +43,7 @@ from asarina.pipeline.get_ecsv import PhotometryPipeline
 from asarina.pipeline.pipeline_utils import TransientSearcher
 from asarina.pipeline.c0_pipeline import DatabaseUploader
 from asarina.pipeline.proc_images import CAMERA_CROPS
+from asarina.pipeline.patch_window import compute_keywords, KNOWN_WINDOW_SIZES
 from asarina.chip_id import get_camera_id
 
 # Logging is configured in main() after -v is parsed.
@@ -346,8 +348,14 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="RTS2 imgproc pipeline")
     parser.add_argument('fits_file', help='Raw FITS image')
-    parser.add_argument('--ssh-key', required=True,
-                        help='Path to SSH private key for database upload')
+    parser.add_argument('--ssh-key', default=None,
+                        help='Path to SSH private key for database upload (if omitted, upload is skipped)')
+    parser.add_argument('--sbt-window-patch', action='store_true',
+                        help='Patch missing LTV1/2 windowing keywords before calibration (SBT windowed frames)')
+    parser.add_argument('--sip', type=int, default=1, metavar='N',
+                        help='SIP polynomial order for pyrt-dophot (default: 1, SBT uses 2)')
+    parser.add_argument('--passes', type=int, default=2, metavar='N',
+                        help='Number of pyrt-dophot passes (default: 2, SBT uses 3)')
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Show subprocess output and debug logging')
     parser.add_argument('-r', '--realtime', action='store_true',
@@ -377,6 +385,24 @@ def main():
     t_start = time.time()
 
     try:
+        # 0. Patch windowing keywords if absent (SBT windowed frames only)
+        if args.sbt_window_patch:
+            with fits.open(str(raw_path)) as hdul:
+                h = hdul[0].header
+                already_patched = 'LTV1' in h and 'LTV2' in h
+                naxis1 = h.get('NAXIS1')
+                naxis2 = h.get('NAXIS2')
+            if already_patched:
+                logger.debug("sbt-window-patch: LTV1/2 already present, skipping")
+            elif naxis1 == naxis2 and naxis1 in KNOWN_WINDOW_SIZES:
+                kw = compute_keywords(naxis1, chip_w=4144, chip_h=4127, shift=0)
+                with fits.open(str(raw_path), mode='update') as hdul:
+                    for key, (val, comment) in kw.items():
+                        hdul[0].header[key] = (val, comment)
+                logger.info(f"sbt-window-patch: wrote windowing keywords (window={naxis1})")
+            else:
+                logger.debug(f"sbt-window-patch: NAXIS1={naxis1} NAXIS2={naxis2} not a windowed frame, skipping")
+
         # 1. Dark/flat correction
         fits_file = pipeline.calibrate(raw_path, temp_dir)
         if fits_file is None:
@@ -429,7 +455,7 @@ def main():
         _drop_privileges('mates')
 
         # 6. Refined photometry (as mates)
-        ecsv = pipeline.photometry(fits_file, temp_dir)
+        ecsv = pipeline.photometry(fits_file, temp_dir, sip=args.sip, passes=args.passes)
         if ecsv is None:
             sys.exit(1)
 
@@ -439,7 +465,7 @@ def main():
             ecsv_path, _ = pipeline.save_results(ecsv, temp_dir, ctime)
 
         # 8. Upload ECSV to database server
-        if ecsv_path is not None:
+        if ecsv_path is not None and args.ssh_key is not None:
             DatabaseUploader(ssh_key=args.ssh_key).upload_ecsv(ecsv_path)
 
         # 10. Notify transient daemon (as mates, so fnovotny can read the files)
