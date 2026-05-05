@@ -124,8 +124,8 @@ def _copy_wcs_to_raw(calibrated_path: Path, raw_path: Path, chip_id: str,
             if astsigma is None:
                 logger.warning("WCS copy skipped: ASTSIGMA missing from ECSV")
                 return False
-            if float(astsigma) >= 0.5:
-                logger.warning(f"WCS copy skipped: ASTSIGMA={astsigma:.3f} >= 0.5")
+            if float(astsigma) >= 0.2:
+                logger.warning(f"WCS copy skipped: ASTSIGMA={astsigma:.3f} >= 0.2")
                 return False
             if idnum is None or int(idnum) <= 20:
                 logger.warning(f"WCS copy skipped: IDNUM={idnum} <= 20")
@@ -260,7 +260,7 @@ def _make_web_image(calibrated_path: Path, ccd_name: str,
 
         # FITS → JPEG  (%H:%M in the label is expanded by f2cj from DATE-OBS)
         ret = subprocess.run(
-            ["f2cj", "--label", f"D50 {ccd_name} - %H:%M",
+            ["pyrt-f2cj", "--label", f"D50 {ccd_name} - %H:%M",
              "-o", str(full_jpg), "-i", str(temp_fits)],
             capture_output=True,
         )

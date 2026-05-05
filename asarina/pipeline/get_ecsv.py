@@ -163,7 +163,7 @@ class PhotometryPipeline:
             t = time.time()
             ret = subprocess.run(
                 ["pyrt-dophot", "-m0.5", "-az", f"-S{sip}",
-                 "-U", ".r3,.p2", "-i2", "--max-stars", "1000", input_file],
+                 "-U", ".r3,.p3,.l", "-i2", "--max-stars", "1000", input_file],
                 cwd=str(temp_dir), capture_output=True, text=True,
             )
             elapsed = time.time() - t
