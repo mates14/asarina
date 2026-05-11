@@ -2,7 +2,9 @@
 
 import argparse
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import logging
@@ -376,18 +378,25 @@ class ImageProcessor:
 
         return None
     
-    def process_object(self, obj_path: str, output_dir: str = ".", 
-                      overwrite: bool = False) -> Optional[str]:
+    def process_object(self, obj_path: str, output_dir: str = ".",
+                      overwrite: bool = False,
+                      photometry: bool = True) -> Optional[str]:
         """Process a single object frame.
-        
-        Returns:
-            Output filename if successful, None otherwise
+
+        Performs dark/flat correction and, by default, a full solve+photometry
+        pass (same iterative dophot as the automated pipeline).  The FITS and
+        its paired ECSV are written to output_dir only when the astrometric
+        quality check passes; on failure nothing is written.
+
+        Pass photometry=False to get the raw dark/flat-corrected file only.
+
+        Returns the output FITS path on success, None otherwise.
         """
         try:
             with fits.open(obj_path) as hdul:
                 header = hdul[0].header
                 data = hdul[0].data
-                
+
                 # Extract metadata
                 chip = load_chip_id(header)
                 c_time = header['CTIME']
@@ -396,36 +405,36 @@ class ImageProcessor:
                 temp = header['CCD_TEMP']
                 expt = header['EXPTIME']
                 binx = self._get_header_value(header, 'BINX', 1)
-                
+
                 # Generate output filename
                 datum = datetime.utcfromtimestamp(c_time)
                 datestr = datum.strftime("%Y%m%d%H%M%S")
                 output_name = f"{datestr}-{usec//1000:03d}-{fltr}-{expt:03.0f}-df.fits"
                 output_path = Path(output_dir) / output_name
-                
+
                 if output_path.exists() and not overwrite:
                     logger.warning(f"{output_name}: Would overwrite existing file")
                     return None
-                
+
                 # Find calibration frames
                 dark_path = self.find_best_dark(chip, temp, binx, expt)
                 flat_path = self.find_flat(chip, fltr, binx)
-                
+
                 if dark_path is None:
                     logger.error(f"{output_name}: No suitable dark frame")
                     return None
-                
+
                 if flat_path is None:
                     logger.error(f"{output_name}: No suitable flat field")
                     return None
-                
+
                 # Load calibration data
                 with fits.open(dark_path) as dark_hdul:
                     dark_data = dark_hdul[0].data
-                
+
                 with fits.open(flat_path) as flat_hdul:
                     flat_data = flat_hdul[0].data
-                
+
                 # Crop calibration frames to match a windowed science frame
                 window = self._parse_ccdsec(header)
                 if window is not None:
@@ -440,45 +449,69 @@ class ImageProcessor:
                 crop = None if window is not None else CAMERA_CROPS.get(chip)
                 if crop is not None:
                     calibrated = calibrated[crop]
-                    # crop is (row_slice, col_slice); adjust reference pixel accordingly
                     if 'CRPIX1' in header:
                         header['CRPIX1'] -= crop[1].start  # column offset
                     if 'CRPIX2' in header:
                         header['CRPIX2'] -= crop[0].start  # row offset
 
-                # Write output
                 output_hdu = fits.PrimaryHDU(data=calibrated, header=header)
+
+                logger.debug(f"  {output_name}: mean={np.mean(calibrated):.1f}, "
+                             f"std={np.std(calibrated):.1f}, median={np.median(calibrated):.1f}")
+
+            # --- dark/flat only ---
+            if not photometry:
                 output_hdu.writeto(output_path, overwrite=overwrite)
-                
-                # Log statistics
-                mean_val = np.mean(calibrated)
-                std_val = np.std(calibrated)
-                median_val = np.median(calibrated)
-                
-                logger.debug(f"  {output_name}: mean={mean_val:.1f}, std={std_val:.1f}, "
-                           f"median={median_val:.1f}")
-                
                 return str(output_path)
-                
+
+            # --- solve + photometry; write only on quality-checked success ---
+            from asarina.pipeline.get_ecsv import PhotometryPipeline  # local: avoids circular import
+            pipeline = PhotometryPipeline()
+
+            with tempfile.TemporaryDirectory() as tmp_str:
+                tmp = Path(tmp_str)
+                output_hdu.writeto(str(tmp / output_name))
+
+                if not pipeline.solve(output_name, tmp):
+                    logger.warning(f"{output_name}: astrometric solve failed — skipped")
+                    return None
+
+                ecsv_name = pipeline.photometry(output_name, tmp)
+                if ecsv_name is None:
+                    logger.warning(f"{output_name}: photometry/quality check failed — skipped")
+                    return None
+
+                ecsv_output = output_path.with_suffix('.ecsv')
+                if ecsv_output.exists() and not overwrite:
+                    logger.warning(f"{ecsv_output.name}: Would overwrite existing file")
+                    return None
+
+                shutil.move(str(tmp / output_name), str(output_path))
+                shutil.move(str(tmp / ecsv_name), str(ecsv_output))
+
+            logger.info(f"Wrote {output_path.name} + {ecsv_output.name}")
+            return str(output_path)
+
         except Exception as e:
-            logger.error(f"Error df correcting 1 {obj_path}: {e}")
+            logger.error(f"Error processing {obj_path}: {e}")
             return None
     
-    def process_all_objects(self, output_dir: str = ".", 
-                           overwrite: bool = False) -> List[str]:
+    def process_all_objects(self, output_dir: str = ".",
+                           overwrite: bool = False,
+                           photometry: bool = True) -> List[str]:
         """Process all loaded object frames.
-        
+
         Returns:
             List of successfully processed output files
         """
         successful = []
-        
+
         for obj_path in self.objects:
-            result = self.process_object(obj_path, output_dir, overwrite)
+            result = self.process_object(obj_path, output_dir, overwrite, photometry)
             if result:
                 successful.append(result)
-        
-        logger.debug(f"Successfully df corrected {len(successful)}/{len(self.objects)} frames")
+
+        logger.debug(f"Successfully processed {len(successful)}/{len(self.objects)} frames")
         return successful
 
 
@@ -499,26 +532,25 @@ def main():
     parser.add_argument('--calib-dir', default='/home/mates/flat{year}/',
                        help='Calibration directory template with {year} placeholder '
                             '(default: /home/mates/flat{year}/)')
+    parser.add_argument('--no-photometry', action='store_true',
+                       help='Skip solve+photometry; write dark/flat-corrected FITS only')
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Verbose output')
-    
+
     args = parser.parse_args()
-    
+
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
-    
-    # Create processor
+
     processor = ImageProcessor(
         temp_grouping=args.temp_grouping,
         exposure_tolerance=args.exposure_tolerance,
         calib_dir_template=args.calib_dir
     )
-    
-    # Load calibration frames
+
     processor.load_calibration_frames(args.files)
-    
-    # Process objects
-    processor.process_all_objects(args.output_dir, args.overwrite)
+    processor.process_all_objects(args.output_dir, args.overwrite,
+                                  photometry=not args.no_photometry)
 
 
 if __name__ == "__main__":
