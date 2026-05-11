@@ -86,35 +86,45 @@ class DatabaseUploader:
                 "ssh", "-i", self.ssh_key, self.zeus_host,
                 f"mkdir -p {remote_path}"
             ]
-            result = subprocess.run(mkdir_cmd, capture_output=True, text=True)
+            result = subprocess.run(mkdir_cmd, capture_output=True, text=True, timeout=30)
             if result.returncode != 0:
                 logger.error(f"Failed to create remote directory: {result.stderr}")
                 return False
-            
+
             # Upload ECSV file
             scp_cmd = [
                 "scp", "-i", self.ssh_key, str(ecsv_path),
                 f"{self.zeus_host}:{remote_path}/"
             ]
-            result = subprocess.run(scp_cmd, capture_output=True, text=True)
+            result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=60)
             if result.returncode != 0:
                 logger.error(f"Failed to upload ECSV: {result.stderr}")
                 return False
             
             # Trigger database processing
-            overwrite_flag = "-f" if overwrite else ""
             process_cmd = [
                 "ssh", "-i", self.ssh_key, self.hog_host,
-                self.remote_script, overwrite_flag, f"{remote_path}/{ecsv_name}"
+                self.remote_script
             ]
-            result = subprocess.run(process_cmd, capture_output=True, text=True)
+            if overwrite:
+                process_cmd.append("-f")
+            process_cmd.append(f"{remote_path}/{ecsv_name}")
+
+            result = subprocess.run(process_cmd, capture_output=True, text=True, timeout=120)
+            if result.stdout.strip():
+                logger.info(f"mk-img.py: {result.stdout.strip()}")
+            if result.stderr.strip():
+                logger.warning(f"mk-img.py stderr: {result.stderr.strip()}")
             if result.returncode != 0:
-                logger.error(f"Failed to process in database: {result.stderr}")
+                logger.error(f"Failed to process in database (exit {result.returncode}): {result.stderr}")
                 return False
-            
+
             logger.info(f"Successfully uploaded and processed {ecsv_name}")
             return True
-            
+
+        except subprocess.TimeoutExpired:
+            logger.error(f"SSH/SCP timeout while uploading {ecsv_path.name}")
+            return False
         except Exception as e:
             logger.error(f"Error uploading {ecsv_path}: {e}")
             return False

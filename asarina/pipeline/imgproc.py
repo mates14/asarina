@@ -25,6 +25,7 @@ import logging
 import math
 from typing import Optional
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -367,7 +368,8 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(stream=sys.stderr, format='%(levelname)s %(name)s: %(message)s')
-    logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.WARNING)
+    logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.INFO)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
 
     raw_path = Path(args.fits_file)
     if not raw_path.exists():
@@ -385,10 +387,10 @@ def main():
         phdb_root='/home/mates/phdb',
         png_root='/home/mates/png',
     )
-    temp_dir = Path(tempfile.mkdtemp(prefix='imgproc.'))
     t_start = time.time()
+    with tempfile.TemporaryDirectory(prefix='imgproc.') as _tmpdir:
+        temp_dir = Path(_tmpdir)
 
-    try:
         # 0. Patch windowing keywords if absent (SBT windowed frames only)
         if args.sbt_window_patch:
             with fits.open(str(raw_path)) as hdul:
@@ -479,9 +481,6 @@ def main():
             TransientSearcher().search_transients(ecsv_path, fits_for_transients)
 
         logger.info(f"imgproc total run time {time.time() - t_start:.1f}s")
-
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 if __name__ == '__main__':
