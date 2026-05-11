@@ -481,12 +481,19 @@ class ImageProcessor:
                     logger.warning(f"{output_name}: photometry/quality check failed — skipped")
                     return None
 
+                # pyrt-dophot writes the astrometrised image as {base}t.fits, not in-place.
+                dft_name = output_name.replace('.fits', 't.fits')
+                if not (tmp / dft_name).exists():
+                    logger.warning(f"{dft_name}: astrometrised FITS not found — skipped")
+                    return None
+
                 ecsv_output = output_path.with_suffix('.ecsv')
                 if ecsv_output.exists() and not overwrite:
                     logger.warning(f"{ecsv_output.name}: Would overwrite existing file")
                     return None
 
-                shutil.move(str(tmp / output_name), str(output_path))
+                # Rename dft.fits → df.fits so FITS and ECSV share the same stem.
+                shutil.move(str(tmp / dft_name), str(output_path))
                 shutil.move(str(tmp / ecsv_name), str(ecsv_output))
 
             logger.info(f"Wrote {output_path.name} + {ecsv_output.name}")
