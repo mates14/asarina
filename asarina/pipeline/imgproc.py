@@ -117,25 +117,24 @@ def _copy_wcs_to_raw(calibrated_path: Path, raw_path: Path, chip_id: str,
             return False
 
         # Quality check from ECSV metadata (authoritative source).
-        # ASTSCATT, ASTWSSR, and IDNUM (matched-star count) live there, not in the FITS header.
+        # ASTSCATT and IDNUM (matched-star count) live there, not in the FITS header.
         if ecsv_path is not None and ecsv_path.exists():
             meta = Table.read(str(ecsv_path), format='ascii.ecsv').meta
             astscatt = meta.get('ASTSCATT')
             astwssr  = meta.get('ASTWSSR')
             idnum    = meta.get('IDNUM')
-            if astscatt is None or astwssr is None:
-                logger.warning("WCS copy skipped: ASTSCATT/ASTWSSR missing from ECSV")
+            if astscatt is None:
+                logger.warning("WCS copy skipped: ASTSCATT missing from ECSV")
                 return False
             if float(astscatt) >= 0.3:
                 logger.warning(f"WCS copy skipped: ASTSCATT={float(astscatt):.3f} >= 0.3")
                 return False
-            if float(astwssr) >= 20:
-                logger.warning(f"WCS copy skipped: ASTWSSR={float(astwssr):.1f} >= 20")
-                return False
             if idnum is None or int(idnum) <= 20:
                 logger.warning(f"WCS copy skipped: IDNUM={idnum} <= 20")
                 return False
-            logger.debug(f"WCS quality ok: ASTSCATT={float(astscatt):.3f} ASTWSSR={float(astwssr):.1f} IDNUM={idnum}")
+            logger.debug(f"WCS quality ok: ASTSCATT={float(astscatt):.3f}"
+                         + (f" ASTWSSR={float(astwssr):.1f}" if astwssr is not None else "")
+                         + f" IDNUM={idnum}")
 
         with fits.open(str(raw_path), mode='update') as raw:
             hdr = raw[0].header
