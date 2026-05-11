@@ -187,18 +187,22 @@ class PhotometryPipeline:
         # Quality check: reject poor astrometric solutions before saving anything.
         from astropy.table import Table
         meta = Table.read(str(temp_dir / ecsv_file), format='ascii.ecsv').meta
-        astsigma = meta.get('ASTSIGMA')
+        astscatt = meta.get('ASTSCATT')
+        astwssr  = meta.get('ASTWSSR')
         idnum    = meta.get('IDNUM')
-        if astsigma is None:
-            logger.error("ASTSIGMA missing from ECSV — rejecting solution")
+        if astscatt is None or astwssr is None:
+            logger.error("ASTSCATT/ASTWSSR missing from ECSV — rejecting solution")
             return None
-        if float(astsigma) >= 1.0:
-            logger.error(f"ASTSIGMA={float(astsigma):.3f} >= 1.0 — rejecting solution")
+        if float(astscatt) >= 0.3:
+            logger.error(f"ASTSCATT={float(astscatt):.3f} >= 0.3 — rejecting solution")
+            return None
+        if float(astwssr) >= 20:
+            logger.error(f"ASTWSSR={float(astwssr):.1f} >= 20 — rejecting solution")
             return None
         if idnum is None or int(idnum) <= 20:
             logger.error(f"IDNUM={idnum} <= 20 — rejecting solution")
             return None
-        logger.info(f"Solution quality ok: ASTSIGMA={float(astsigma):.3f} IDNUM={idnum}")
+        logger.info(f"Solution quality ok: ASTSCATT={float(astscatt):.3f} ASTWSSR={float(astwssr):.1f} IDNUM={idnum}")
 
         return ecsv_file
 

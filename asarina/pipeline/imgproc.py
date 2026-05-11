@@ -91,7 +91,7 @@ def _copy_wcs_to_raw(calibrated_path: Path, raw_path: Path, chip_id: str,
     The calibrated image may have been cropped; CRPIX values are adjusted
     back to raw-image coordinates using the known crop offset.
 
-    ecsv_path, if given, is read for ASTSIGMA/IDNUM quality checks.
+    ecsv_path, if given, is read for ASTSCATT/ASTWSSR/IDNUM quality checks.
     These keywords live in the ECSV metadata, not the FITS header.
     """
     from astropy.table import Table
@@ -116,21 +116,25 @@ def _copy_wcs_to_raw(calibrated_path: Path, raw_path: Path, chip_id: str,
             return False
 
         # Quality check from ECSV metadata (authoritative source).
-        # ASTSIGMA and IDNUM (matched-star count) live there, not in the FITS header.
+        # ASTSCATT, ASTWSSR, and IDNUM (matched-star count) live there, not in the FITS header.
         if ecsv_path is not None and ecsv_path.exists():
             meta = Table.read(str(ecsv_path), format='ascii.ecsv').meta
-            astsigma = meta.get('ASTSIGMA')
+            astscatt = meta.get('ASTSCATT')
+            astwssr  = meta.get('ASTWSSR')
             idnum    = meta.get('IDNUM')
-            if astsigma is None:
-                logger.warning("WCS copy skipped: ASTSIGMA missing from ECSV")
+            if astscatt is None or astwssr is None:
+                logger.warning("WCS copy skipped: ASTSCATT/ASTWSSR missing from ECSV")
                 return False
-            if float(astsigma) >= 0.2:
-                logger.warning(f"WCS copy skipped: ASTSIGMA={astsigma:.3f} >= 0.2")
+            if float(astscatt) >= 0.3:
+                logger.warning(f"WCS copy skipped: ASTSCATT={float(astscatt):.3f} >= 0.3")
+                return False
+            if float(astwssr) >= 20:
+                logger.warning(f"WCS copy skipped: ASTWSSR={float(astwssr):.1f} >= 20")
                 return False
             if idnum is None or int(idnum) <= 20:
                 logger.warning(f"WCS copy skipped: IDNUM={idnum} <= 20")
                 return False
-            logger.debug(f"WCS quality ok: ASTSIGMA={astsigma:.3f} IDNUM={idnum}")
+            logger.debug(f"WCS quality ok: ASTSCATT={float(astscatt):.3f} ASTWSSR={float(astwssr):.1f} IDNUM={idnum}")
 
         with fits.open(str(raw_path), mode='update') as raw:
             hdr = raw[0].header
