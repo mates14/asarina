@@ -24,6 +24,7 @@ CAMERA_CROPS = {
     'mi6166': np.s_[10:4108, 29:4127],
     'mi6167': np.s_[10:4108, 29:4127],
     'mi0008': np.s_[4:1476,  34:2218],
+    'mi0315': np.s_[19:1218, 215:1414],   # Makak zenith camera
 }
 
 # Configure logging

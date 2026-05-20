@@ -565,6 +565,36 @@ def main():
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Verbose output')
 
+    # Output layout
+    parser.add_argument('--phdb-root', default='~/phdb',
+                       help='Root directory for ECSV output (default: ~/phdb)')
+    parser.add_argument('--phdb-date-fmt', default='%y%m', metavar='FMT',
+                       help='strftime format for ECSV subdirectory (default: %%y%%m)')
+    parser.add_argument('--png-root', default='~/png')
+    parser.add_argument('--daily-summary', metavar='DIR', dest='daily_summary_dir',
+                       help='Directory for nightly summary .dat files')
+
+    # Calibration
+    parser.add_argument('--smart-dark', metavar='CALIB.npy', dest='smart_dark_calib',
+                       help='Per-pixel dark model (.npy); bypasses master dark+flat')
+    parser.add_argument('--pixel-scale', type=float, metavar='ARCSEC',
+                       help='Pixel scale hint for pyrt-field-solve (arcsec/px)')
+
+    # Photometry
+    parser.add_argument('--dophot-model', metavar='FILE')
+    parser.add_argument('--dophot-catalog', metavar='NAME')
+    parser.add_argument('--dophot-maglim', type=float, metavar='N')
+    parser.add_argument('--dophot-enlarge', type=float, metavar='N')
+    parser.add_argument('--dophot-terms', metavar='TERMS')
+    parser.add_argument('--dophot-idlimit', type=int, metavar='N')
+    parser.add_argument('--dophot-max-stars', type=int, default=1000, metavar='N',
+                       help='Max stars for dophot (0 = no limit; default 1000)')
+
+    # Makak bundle
+    parser.add_argument('--makak', action='store_true', dest='makak_mode',
+                       help='Enable Makak-specific features: dark-frame detection, '
+                            '55"/px scale hint, -k in pyrt-dophot, mi0315 crop')
+
     args = parser.parse_args()
 
     # Setup logging
@@ -586,7 +616,21 @@ def main():
         cleanup_interval_hours=args.cleanup_interval_hours,
         cleanup_ecsv=not args.no_cleanup,
         run_transients=args.run_transients,
-        ssh_key=args.ssh_key
+        ssh_key=args.ssh_key,
+        phdb_root=args.phdb_root,
+        phdb_date_fmt=args.phdb_date_fmt,
+        png_root=args.png_root,
+        daily_summary_dir=args.daily_summary_dir,
+        smart_dark_calib=args.smart_dark_calib,
+        pixel_scale=args.pixel_scale,
+        dophot_model=args.dophot_model,
+        dophot_catalog=args.dophot_catalog,
+        dophot_maglim=args.dophot_maglim,
+        dophot_enlarge=args.dophot_enlarge,
+        dophot_terms=args.dophot_terms,
+        dophot_idlimit=args.dophot_idlimit,
+        dophot_max_stars=args.dophot_max_stars,
+        makak_mode=args.makak_mode,
 #        fast=args.fast
     )
     

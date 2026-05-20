@@ -16,6 +16,7 @@ dependencies = [
 [project.scripts]
 asarina-make-calib    = "asarina.calib.make_calib:main"
 asarina-proc-images   = "asarina.pipeline.proc_images:main"
+asarina-photometry    = "asarina.pipeline.get_ecsv:main"
 asarina-pipeline      = "asarina.pipeline.c0_pipeline:main"
 asarina-imgproc       = "asarina.pipeline.imgproc:main"
 asarina-patch-window  = "asarina.pipeline.patch_window:main"
