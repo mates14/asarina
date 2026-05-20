@@ -22,10 +22,10 @@ Output structure: `~/calib/{camera_id}/{year}/`
 
 Real-time image processing pipeline for automated nightly observations.
 
-- `c0_pipeline.py` — main daemon: watches for new FITS images, runs the photometry chain, uploads results. Integrates with systemd (watchdog, journal logging).
-- `c0_pipeline_single.py` — single-image variant of the pipeline.
-- `get_ecsv.py` — wraps the pyrt photometry chain (`pyrt-phcat` → `pyrt-field-solve` → `pyrt-cat2det` → `pyrt-dophot`) into a `PhotometryPipeline` class; checks output quality.
-- `proc_images.py` — applies dark and flat calibration to raw object frames; handles camera-specific cropping.
+- `imgproc.py` — single-image processor: dark/flat → astrometry → dophot → ECSV/PNG + corrwerr to stdout for RTS2. Called directly by the RTS2 imgproc daemon.
+- `watch.py` — file-watching daemon: polls for new FITS images from a camera, hands each to `PhotometryPipeline`, uploads results. Integrates with systemd (watchdog, journal logging).
+- `ingest.py` — `PhotometryPipeline` class: dark/flat → astrometry → dophot → ECSV + DB upload. CLI entry point (`asarina-ingest`) for batch photometry on a list of files.
+- `image.py` — `ImageProcessor` class: dark/flat correction + optional solve/photometry. CLI entry point (`asarina-image`) for producing calibrated FITS files.
 - `pipeline_utils.py` — shared utilities: `HealthChecker`, `PngCleaner`, `setup_logging`.
 - `transient_daemon.py` — monitors ECSV output for transient events and triggers follow-up.
 
@@ -46,13 +46,15 @@ pip install -e /home/mates/pyrt
 | Command | Entry point |
 |---|---|
 | `asarina-make-calib` | `asarina.calib.make_calib:main` |
-| `asarina-proc-images` | `asarina.pipeline.proc_images:main` |
-| `asarina-pipeline` | `asarina.pipeline.c0_pipeline:main` |
+| `asarina-image` | `asarina.pipeline.image:main` |
+| `asarina-ingest` | `asarina.pipeline.ingest:main` |
+| `asarina-watch` | `asarina.pipeline.watch:main` |
+| `asarina-imgproc` | `asarina.pipeline.imgproc:main` |
 
 ## systemd
 
 Service unit files are in `systemd/`:
 
-- `c0-pipeline.service` — runs `c0_pipeline.py`, restarts on failure, 2 GB RAM / 80% CPU limits, watchdog every 120 s.
+- `c0-pipeline.service` — runs `asarina-watch`, restarts on failure, 2 GB RAM / 80% CPU limits, watchdog every 120 s.
 
 Copy to `/etc/systemd/system/` and run `systemctl enable --now <service>`.

@@ -40,10 +40,9 @@ from astropy.wcs import WCS, FITSFixedWarning
 
 warnings.filterwarnings('ignore', category=FITSFixedWarning)
 
-from asarina.pipeline.get_ecsv import PhotometryPipeline
-from asarina.pipeline.pipeline_utils import TransientSearcher
-from asarina.pipeline.c0_pipeline import DatabaseUploader
-from asarina.pipeline.proc_images import CAMERA_CROPS
+from asarina.pipeline.ingest import PhotometryPipeline
+from asarina.pipeline.pipeline_utils import TransientSearcher, DatabaseUploader
+from asarina.pipeline.image import CAMERA_CROPS
 from asarina.pipeline.patch_window import compute_keywords, KNOWN_WINDOW_SIZES
 from asarina.chip_id import get_camera_id
 
@@ -352,6 +351,8 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="RTS2 imgproc pipeline")
     parser.add_argument('fits_file', help='Raw FITS image')
+    parser.add_argument('-f', '--force', action='store_true',
+                        help='Reprocess even if ECSV already exists')
     parser.add_argument('--ssh-key', default=None,
                         help='Path to SSH private key for database upload (if omitted, upload is skipped)')
     parser.add_argument('--sbt-window-patch', action='store_true',
@@ -363,7 +364,38 @@ def main():
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Show subprocess output and debug logging')
     parser.add_argument('-r', '--realtime', action='store_true',
-                        help='Enable real-time web preview generation (do not use during offline reprocessing)')
+                        help='RTS2 real-time mode: web preview, corrwerr to stdout, WCS written back to raw')
+
+    output = parser.add_argument_group('output')
+    output.add_argument('--phdb-root', default='/home/mates/phdb',
+                        help='Root directory for ECSV output (default: /home/mates/phdb)')
+    output.add_argument('--phdb-date-fmt', default='%y%m', metavar='FMT',
+                        help='strftime format for ECSV subdirectory (default: %%y%%m)')
+    output.add_argument('--png-root', default='/home/mates/png')
+    output.add_argument('--daily-summary', metavar='DIR', dest='daily_summary_dir',
+                        help='Directory for nightly summary .dat files')
+
+    calib = parser.add_argument_group('calibration')
+    calib.add_argument('--smart-dark', metavar='CALIB.npy', dest='smart_dark_calib',
+                       help='Per-pixel dark model (.npy); bypasses master dark+flat')
+
+    solve = parser.add_argument_group('astrometric solve')
+    solve.add_argument('--pixel-scale', type=float, metavar='ARCSEC',
+                       help='Pixel scale hint for pyrt-field-solve (arcsec/px)')
+
+    phot = parser.add_argument_group('photometry')
+    phot.add_argument('--dophot-model', metavar='FILE')
+    phot.add_argument('--dophot-catalog', metavar='NAME')
+    phot.add_argument('--dophot-maglim', type=float, metavar='N')
+    phot.add_argument('--dophot-enlarge', type=float, metavar='N')
+    phot.add_argument('--dophot-terms', metavar='TERMS')
+    phot.add_argument('--dophot-idlimit', type=int, metavar='N')
+    phot.add_argument('--dophot-max-stars', type=int, default=1000, metavar='N',
+                      help='Max stars for dophot (0 = no limit; default 1000)')
+    phot.add_argument('--makak', action='store_true', dest='makak_mode',
+                      help='Enable Makak-specific features: dark-frame detection, '
+                           '55\"/px scale hint, -k in pyrt-dophot, mi0315 crop')
+
     args = parser.parse_args()
 
     logging.basicConfig(stream=sys.stderr, format='%(levelname)s %(name)s: %(message)s')
@@ -379,13 +411,32 @@ def main():
     with fits.open(str(raw_path)) as hdul:
         raw_header = hdul[0].header.copy()
         ctime    = raw_header.get('CTIME')
-        chip_id  = get_camera_id(raw_header)          # physical: andor46, mi6166, …
+        chip_id  = get_camera_id(raw_header)           # physical: andor46, mi6166, …
         ccd_name = raw_header.get('CCD_NAME', chip_id) # RTS2 name: C0, C1, …
 
     pipeline = PhotometryPipeline(
-        phdb_root='/home/mates/phdb',
-        png_root='/home/mates/png',
+        phdb_root=args.phdb_root,
+        png_root=args.png_root,
+        phdb_date_fmt=args.phdb_date_fmt,
+        daily_summary_dir=args.daily_summary_dir,
+        smart_dark_calib=args.smart_dark_calib,
+        pixel_scale=args.pixel_scale,
+        dophot_model=args.dophot_model,
+        dophot_catalog=args.dophot_catalog,
+        dophot_maglim=args.dophot_maglim,
+        dophot_enlarge=args.dophot_enlarge,
+        dophot_terms=args.dophot_terms,
+        dophot_idlimit=args.dophot_idlimit,
+        dophot_max_stars=args.dophot_max_stars,
+        makak_mode=args.makak_mode,
     )
+
+    if not args.force:
+        existing = pipeline._check_existing_ecsv(str(raw_path))
+        if existing:
+            logger.info(f"Result already exists: {existing} (use -f to reprocess)")
+            sys.exit(0)
+
     t_start = time.time()
     with tempfile.TemporaryDirectory(prefix='imgproc.') as _tmpdir:
         temp_dir = Path(_tmpdir)
@@ -415,7 +466,6 @@ def main():
         calibrated = temp_dir / fits_file
 
         # 2. Web preview — runs in parallel with solve, does not delay corrwerr
-        #    Skipped during offline reprocessing to avoid interfering with live observations.
         if args.realtime:
             threading.Thread(
                 target=_make_web_image, args=(calibrated, ccd_name), daemon=True,
@@ -430,13 +480,14 @@ def main():
             cat_path = temp_dir / fits_file.replace('.fits', '.cat')
             _report_fwhm(cat_path, ccd_name)
 
-        # 4. Copy WCS into raw image and release it
-        #    No ECSV yet at this point (photometry runs after corrwerr).
-        _copy_wcs_to_raw(calibrated, raw_path, chip_id)
+        # 4. Copy WCS into raw image and release it to RTS2 for archiving
+        if args.realtime:
+            _copy_wcs_to_raw(calibrated, raw_path, chip_id)
 
-        # 5. Report to RTS2
-        _corrwerr(calibrated, raw_header, chip_id)
-        logger.info(f"corrwerr produced in {time.time() - t_start:.1f}s")
+        # 5. Report to RTS2 — corrwerr must be on stdout, nothing else may be
+        if args.realtime:
+            _corrwerr(calibrated, raw_header, chip_id)
+            logger.info(f"corrwerr produced in {time.time() - t_start:.1f}s")
 
         # --- RTS2 reads corrwerr and begins archiving the raw image ---
 
@@ -473,7 +524,7 @@ def main():
         if ecsv_path is not None and args.ssh_key is not None:
             DatabaseUploader(ssh_key=args.ssh_key).upload_ecsv(ecsv_path)
 
-        # 10. Notify transient daemon (as mates, so fnovotny can read the files)
+        # 9. Notify transient daemon (as mates, so fnovotny can read the files)
         if ecsv_path is not None:
             dft = temp_dir / fits_file.replace('df.fits', 'dft.fits')
             fits_for_transients = str(dft) if dft.exists() else str(calibrated)

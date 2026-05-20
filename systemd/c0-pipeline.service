@@ -12,8 +12,8 @@ User=mates
 Group=mates
 WorkingDirectory=/home/mates/pipeline
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
-ExecStart=/home/mates/pipeline/c0_pipeline.py --systemd --run-transients --camera-pattern C0
-#ExecStart=/home/mates/pipeline/c0_pipeline.py --systemd --camera-pattern C0
+ExecStart=asarina-watch --systemd --run-transients --camera-pattern C0
+#ExecStart=asarina-watch --systemd --camera-pattern C0
 ExecReload=/bin/kill -HUP $MAINPID
 NoNewPrivileges=false
 

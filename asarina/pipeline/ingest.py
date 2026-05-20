@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 
-import argparse
 import fcntl
 import os
-import sys
 import subprocess
 import tempfile
 import shutil
@@ -14,7 +12,7 @@ import logging
 from datetime import datetime
 
 from astropy.io import fits
-from asarina.pipeline.proc_images import ImageProcessor
+from asarina.pipeline.image import ImageProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +124,7 @@ class PhotometryPipeline:
         import numpy as np
         from asarina.calib.smart_dark import smart_dark, image_bgsigma
         from asarina.chip_id import load_chip_id
-        from asarina.pipeline.proc_images import CAMERA_CROPS
+        from asarina.pipeline.image import CAMERA_CROPS
 
         try:
             with fits.open(str(image_path)) as hdul:
@@ -456,7 +454,7 @@ class PhotometryPipeline:
             logger.error(f"Error processing dark frame {image_path.name}: {e}")
 
     # ------------------------------------------------------------------
-    # High-level entry point (used by c0_pipeline)
+    # High-level entry point (used by watch)
     # ------------------------------------------------------------------
 
     def process_image(self, image_path: str, force: bool = False,
@@ -521,81 +519,3 @@ class PhotometryPipeline:
         logger.info(f"Successfully processed {len(successful)}/{len(image_paths)} images")
         return successful
 
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Complete photometry pipeline: calibration + astrometry + dophot"
-    )
-    parser.add_argument('images', nargs='+', help='Input FITS images')
-    parser.add_argument('-f', '--force', action='store_true',
-                        help='Redo even if ECSV exists')
-    parser.add_argument('-i', '--keep-image', action='store_true',
-                        help='Keep calibrated FITS after processing')
-    parser.add_argument('--phdb-root', default='~/phdb',
-                        help='Root directory for ECSV output (default: ~/phdb)')
-    parser.add_argument('--phdb-date-fmt', default='%y%m', metavar='FMT',
-                        help='strftime format for ECSV subdirectory (default: %%y%%m)')
-    parser.add_argument('--png-root', default='~/png')
-    parser.add_argument('--calib-dir', default='/home/mates/flat{year}/',
-                        dest='calib_dir_template')
-
-    calib = parser.add_argument_group('calibration')
-    calib.add_argument('--smart-dark', metavar='CALIB.npy', dest='smart_dark_calib',
-                       help='Per-pixel dark model file (.npy); bypasses master dark+flat')
-
-    solve = parser.add_argument_group('astrometric solve')
-    solve.add_argument('--pixel-scale', type=float, metavar='ARCSEC',
-                       help='Pixel scale hint for pyrt-field-solve (arcsec/px)')
-
-    phot = parser.add_argument_group('photometry (pyrt-dophot)')
-    phot.add_argument('--dophot-model', metavar='FILE',
-                      help='Model file (-M)')
-    phot.add_argument('--dophot-catalog', metavar='NAME',
-                      help='Reference catalog name (-C)')
-    phot.add_argument('--dophot-maglim', type=float, metavar='N',
-                      help='Magnitude limit (-l); omit for default')
-    phot.add_argument('--dophot-enlarge', type=float, metavar='N',
-                      help='Enlarge factor (-e)')
-    phot.add_argument('--dophot-terms', metavar='TERMS',
-                      help='Uncertainty terms (-U); replaces default .r3,.p3,.l')
-    phot.add_argument('--dophot-idlimit', type=int, metavar='N',
-                      help='ID-limit iterations (-i); default 2')
-    phot.add_argument('--dophot-max-stars', type=int, default=1000, metavar='N',
-                      help='Max stars for dophot (0 = no limit; default 1000)')
-
-    output = parser.add_argument_group('output')
-    output.add_argument('--daily-summary', metavar='DIR', dest='daily_summary_dir',
-                        help='Directory for nightly summary .dat files (mr{YYYYMMDD}.dat)')
-
-    parser.add_argument('--makak', action='store_true', dest='makak_mode',
-                        help='Enable Makak-specific features: dark-frame detection '
-                             '(slitposx<0.5), 55"/px scale hint, -k in pyrt-dophot, '
-                             'mi0315 camera crop')
-    parser.add_argument('-v', '--verbose', action='store_true')
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format='%(levelname)s: %(message)s')
-
-    pipeline = PhotometryPipeline(
-        phdb_root=args.phdb_root,
-        phdb_date_fmt=args.phdb_date_fmt,
-        png_root=args.png_root,
-        calib_dir_template=args.calib_dir_template,
-        smart_dark_calib=args.smart_dark_calib,
-        pixel_scale=args.pixel_scale,
-        daily_summary_dir=args.daily_summary_dir,
-        dophot_model=args.dophot_model,
-        dophot_catalog=args.dophot_catalog,
-        dophot_maglim=args.dophot_maglim,
-        dophot_enlarge=args.dophot_enlarge,
-        dophot_terms=args.dophot_terms,
-        dophot_idlimit=args.dophot_idlimit,
-        dophot_max_stars=args.dophot_max_stars,
-        makak_mode=args.makak_mode,
-    )
-    pipeline.process_images(args.images, args.force, args.keep_image)
-
-
-if __name__ == "__main__":
-    main()

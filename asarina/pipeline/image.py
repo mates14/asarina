@@ -466,7 +466,7 @@ class ImageProcessor:
                 return str(output_path)
 
             # --- solve + photometry; write only on quality-checked success ---
-            from asarina.pipeline.get_ecsv import PhotometryPipeline  # local: avoids circular import
+            from asarina.pipeline.ingest import PhotometryPipeline  # local: avoids circular import
             pipeline = PhotometryPipeline()
 
             with tempfile.TemporaryDirectory() as tmp_str:

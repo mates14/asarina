@@ -6,6 +6,7 @@ Shared between different pipeline components.
 
 import json
 import socket
+import subprocess
 import time
 import logging
 from pathlib import Path
@@ -128,6 +129,75 @@ class PngCleaner:
                         pass
         except Exception as e:
             self.logger.warning(f"Error cleaning empty directories: {e}")
+
+
+class DatabaseUploader:
+    """Upload ECSV files to the remote photometry database."""
+
+    def __init__(self,
+                 ssh_key: str,
+                 zeus_host: str = "zeus.asu.cas.cz",
+                 hog_host: str = "hog.asu.cas.cz",
+                 remote_script: str = "/home/mates/ecsv/mk-img.py",
+                 local_phdb: str = "/home/mates/phdb",
+                 remote_ecsv: str = "/home/mates/ecsv"):
+        self.ssh_key = ssh_key
+        self.zeus_host = zeus_host
+        self.hog_host = hog_host
+        self.remote_script = remote_script
+        self.local_phdb = local_phdb
+        self.remote_ecsv = remote_ecsv
+
+    def upload_ecsv(self, ecsv_path: str, overwrite: bool = True) -> bool:
+        ecsv_path = Path(ecsv_path)
+        if not ecsv_path.exists():
+            logger.error(f"ECSV file does not exist: {ecsv_path}")
+            return False
+        if "UNK" in ecsv_path.name:
+            logger.info(f"Skipping UNK filter file: {ecsv_path.name}")
+            return False
+        try:
+            ecsv_name = ecsv_path.name
+            relative_path = ecsv_path.parent.relative_to(self.local_phdb)
+            remote_path = f"{self.remote_ecsv}/{relative_path}"
+            logger.info(f"Uploading {ecsv_name} to {remote_path}")
+
+            result = subprocess.run(
+                ["ssh", "-i", self.ssh_key, self.zeus_host, f"mkdir -p {remote_path}"],
+                capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                logger.error(f"Failed to create remote directory: {result.stderr}")
+                return False
+
+            result = subprocess.run(
+                ["scp", "-i", self.ssh_key, str(ecsv_path),
+                 f"{self.zeus_host}:{remote_path}/"],
+                capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                logger.error(f"Failed to upload ECSV: {result.stderr}")
+                return False
+
+            process_cmd = ["ssh", "-i", self.ssh_key, self.hog_host, self.remote_script]
+            if overwrite:
+                process_cmd.append("-f")
+            process_cmd.append(f"{remote_path}/{ecsv_name}")
+            result = subprocess.run(process_cmd, capture_output=True, text=True, timeout=120)
+            if result.stdout.strip():
+                logger.info(f"mk-img.py: {result.stdout.strip()}")
+            if result.stderr.strip():
+                logger.warning(f"mk-img.py stderr: {result.stderr.strip()}")
+            if result.returncode != 0:
+                logger.error(f"Failed to process in database (exit {result.returncode}): {result.stderr}")
+                return False
+
+            logger.info(f"Successfully uploaded and processed {ecsv_name}")
+            return True
+        except subprocess.TimeoutExpired:
+            logger.error(f"SSH/SCP timeout while uploading {ecsv_path.name}")
+            return False
+        except Exception as e:
+            logger.error(f"Error uploading {ecsv_path}: {e}")
+            return False
 
 
 class TransientSearcher:

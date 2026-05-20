@@ -16,12 +16,9 @@ import threading
 import queue
 import signal
 import sys
-import os
-import socket
 from concurrent.futures import ThreadPoolExecutor
 
-from asarina.pipeline.get_ecsv import PhotometryPipeline
-from asarina.pipeline.pipeline_utils import HealthChecker, PngCleaner, TransientSearcher, setup_logging
+from asarina.pipeline.pipeline_utils import HealthChecker, PngCleaner, DatabaseUploader, setup_logging
 
 # Configure logging at module level
 logger = logging.getLogger(__name__)
@@ -34,173 +31,6 @@ except ImportError:
     HAS_SYSTEMD = False
 
 
-class DatabaseUploader:
-    """Handles uploading ECSV files to remote database."""
-    
-    def __init__(self,
-                 ssh_key: str,
-                 zeus_host: str = "zeus.asu.cas.cz",
-                 hog_host: str = "hog.asu.cas.cz",
-                 remote_script: str = "/home/mates/ecsv/mk-img.py",
-                 local_phdb: str = "/home/mates/phdb",
-                 remote_ecsv: str = "/home/mates/ecsv"):
-        
-        self.ssh_key = ssh_key
-        self.zeus_host = zeus_host
-        self.hog_host = hog_host
-        self.remote_script = remote_script
-        self.local_phdb = local_phdb
-        self.remote_ecsv = remote_ecsv
-    
-    def upload_ecsv(self, ecsv_path: str, overwrite: bool = True) -> bool:
-        """Upload ECSV file to database and trigger processing.
-        
-        Args:
-            ecsv_path: Local path to ECSV file
-            overwrite: Whether to overwrite existing database entries
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        ecsv_path = Path(ecsv_path)
-        
-        if not ecsv_path.exists():
-            logger.error(f"ECSV file does not exist: {ecsv_path}")
-            return False
-        
-        # Skip files with UNK filter
-        if "UNK" in ecsv_path.name:
-            logger.info(f"Skipping UNK filter file: {ecsv_path.name}")
-            return False
-        
-        try:
-            # Calculate remote path
-            ecsv_name = ecsv_path.name
-            relative_path = ecsv_path.parent.relative_to(self.local_phdb)
-            remote_path = f"{self.remote_ecsv}/{relative_path}"
-            
-            logger.info(f"Uploading {ecsv_name} to {remote_path}")
-            
-            # Create remote directory
-            mkdir_cmd = [
-                "ssh", "-i", self.ssh_key, self.zeus_host,
-                f"mkdir -p {remote_path}"
-            ]
-            result = subprocess.run(mkdir_cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode != 0:
-                logger.error(f"Failed to create remote directory: {result.stderr}")
-                return False
-
-            # Upload ECSV file
-            scp_cmd = [
-                "scp", "-i", self.ssh_key, str(ecsv_path),
-                f"{self.zeus_host}:{remote_path}/"
-            ]
-            result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=60)
-            if result.returncode != 0:
-                logger.error(f"Failed to upload ECSV: {result.stderr}")
-                return False
-            
-            # Trigger database processing
-            process_cmd = [
-                "ssh", "-i", self.ssh_key, self.hog_host,
-                self.remote_script
-            ]
-            if overwrite:
-                process_cmd.append("-f")
-            process_cmd.append(f"{remote_path}/{ecsv_name}")
-
-            result = subprocess.run(process_cmd, capture_output=True, text=True, timeout=120)
-            if result.stdout.strip():
-                logger.info(f"mk-img.py: {result.stdout.strip()}")
-            if result.stderr.strip():
-                logger.warning(f"mk-img.py stderr: {result.stderr.strip()}")
-            if result.returncode != 0:
-                logger.error(f"Failed to process in database (exit {result.returncode}): {result.stderr}")
-                return False
-
-            logger.info(f"Successfully uploaded and processed {ecsv_name}")
-            return True
-
-        except subprocess.TimeoutExpired:
-            logger.error(f"SSH/SCP timeout while uploading {ecsv_path.name}")
-            return False
-        except Exception as e:
-            logger.error(f"Error uploading {ecsv_path}: {e}")
-            return False
-
-
-
-class ProcessingPipeline:
-    """Complete processing pipeline from image to database."""
-    
-    def __init__(self,
-                 cleanup_ecsv: bool = True,
-                 run_transients: bool = False,
-                 ssh_key: str = None,
-                 **kwargs):
-
-        self.photometry = PhotometryPipeline(**kwargs)
-        self.uploader = DatabaseUploader(ssh_key=ssh_key)
-        self.transient_searcher = TransientSearcher()
-        self.cleanup_ecsv = cleanup_ecsv
-        self.run_transients = run_transients
-    
-    def process_image(self, image_path: str, force: bool = False) -> bool:
-        """Process single image through complete pipeline.
-        
-        Args:
-            image_path: Path to input FITS image
-            force: Force reprocessing even if ECSV exists
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            # Run photometry pipeline, keep image if trasients are to be searched
-            result = self.photometry.process_image(image_path, force=force, keep_image=self.run_transients)
-            if not result:
-                logger.error(f"Photometry failed for {image_path}")
-                return False
-            
-            # Handle return value (could be just ecsv_path or tuple)
-            if isinstance(result, tuple):
-                ecsv_path, fits_path = result
-            else:
-                # Backward compatibility - just ECSV path returned
-                ecsv_path = result
-                fits_path = None
-            
-            # Upload to database
-            upload_success = self.uploader.upload_ecsv(ecsv_path, overwrite=force)
-            if not upload_success:
-                logger.error(f"Database upload failed for {ecsv_path}")
-                return False
-            
-            # Run transient search if enabled
-            if self.run_transients and fits_path:
-                transient_success = self.transient_searcher.search_transients(ecsv_path, fits_path)
-                if not transient_success:
-                    logger.warning(f"Transient search failed for {ecsv_path}")
-                    # Don't return False - transient search failure shouldn't stop pipeline
-                
-                # Clean up the FITS file after transient search
-                try:
-                    Path(fits_path).unlink()
-                    logger.debug(f"Cleaned up temporary FITS file: {fits_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to clean up FITS file {fits_path}: {e}")
-            
-            # Clean up ECSV file if requested
-            if self.cleanup_ecsv:
-                Path(ecsv_path).unlink()
-                logger.info(f"Cleaned up {ecsv_path}")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Pipeline error for {image_path}: {e}")
-            return False
 
 
 class FileMonitor:
@@ -313,11 +143,11 @@ class FileMonitor:
 
 
 class AutomatedPipeline:
-    """Main automated processing system with systemd integration."""
-    
-    def __init__(self, use_systemd=False, png_cleanup_days=7, cleanup_interval_hours=6, 
-                 max_workers=3, **kwargs):
-        self.pipeline = ProcessingPipeline(**kwargs)
+    """File-watching daemon: detects new images and hands each to asarina-imgproc."""
+
+    def __init__(self, use_systemd=False, png_cleanup_days=7, cleanup_interval_hours=6,
+                 max_workers=3, imgproc_base=None):
+        self.imgproc_base = imgproc_base or ['asarina-imgproc']
         self.monitor = FileMonitor()
         self.process_queue = queue.Queue()
         self.health_checker = HealthChecker()
@@ -388,10 +218,7 @@ class AutomatedPipeline:
             return cleanup_stats
         
         return None
-        """Send watchdog ping to systemd."""
-        if self.use_systemd:
-            daemon.notify('WATCHDOG=1')
-    
+
     def _watchdog_worker(self):
         """Worker thread for systemd watchdog pings."""
         if not self.watchdog_interval:
@@ -433,18 +260,18 @@ class AutomatedPipeline:
                 self.health_checker.record_error()
     
     def _process_single_image(self, image_path: str):
-        """Process a single image (runs in thread pool)."""
+        """Process a single image by invoking asarina-imgproc (runs in thread pool)."""
+        cmd = self.imgproc_base + [image_path]
         try:
-            self.logger.info(f"Processing {Path(image_path).name}")
-            success = self.pipeline.process_image(image_path)
-            
-            if success:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
                 self.logger.info(f"✓ Completed {Path(image_path).name}")
                 self.health_checker.record_activity()
             else:
-                self.logger.error(f"✗ Failed {Path(image_path).name}")
+                self.logger.error(f"✗ Failed {Path(image_path).name} (exit {result.returncode})")
+                for line in result.stderr.splitlines()[-10:]:
+                    self.logger.error(f"  {line}")
                 self.health_checker.record_error()
-                
         except Exception as e:
             self.logger.error(f"Error processing {image_path}: {e}")
             self.health_checker.record_error()
@@ -532,121 +359,118 @@ class AutomatedPipeline:
 
 
 def main():
-    """Command line interface."""
     parser = argparse.ArgumentParser(
-        description="Automated astronomical image processing pipeline"
+        description="Watch for new images and process each with asarina-imgproc"
     )
+
+    # Watcher settings
     parser.add_argument('--search-root', default='/images',
-                       help='Root directory to search for images')
+                        help='Root directory to search for images')
     parser.add_argument('--camera-pattern', default='C0',
-                       help='Camera subdirectory pattern')
+                        help='Camera subdirectory pattern')
     parser.add_argument('--poll-interval', type=float, default=1.0,
-                       help='File monitoring poll interval in seconds')
-    parser.add_argument('--no-cleanup', action='store_true',
-                       help='Keep ECSV files after upload')
-    parser.add_argument('--run-transients', action='store_true',
-                       help='Run transient search on processed images')
-    parser.add_argument('--transients-script', default='/home/fnovotny/bin/transients.py',
-                       help='Path to transients script (should be setuid fnovotny)')
+                        help='File monitoring poll interval in seconds')
     parser.add_argument('--png-cleanup-days', type=int, default=7,
-                       help='Delete PNG files older than this many days (default: 7)')
+                        help='Delete PNG files older than this many days (default: 7)')
     parser.add_argument('--cleanup-interval-hours', type=float, default=6,
-                       help='How often to run PNG cleanup in hours (default: 6)')
-    parser.add_argument('--systemd', action='store_true',
-                       help='Enable systemd integration (journal logging, watchdog, notifications)')
-    parser.add_argument('--health-check', action='store_true',
-                       help='Print health status and exit')
+                        help='How often to run PNG cleanup in hours (default: 6)')
     parser.add_argument('--max-workers', type=int, default=3,
-                       help='Number of parallel processing workers (default: 3)')
-    parser.add_argument('--fast', action='store_true',
-                       help='Prefer being less precise and faster')
-    parser.add_argument('--ssh-key', required=True,
-                       help='Path to SSH private key for database upload')
-    parser.add_argument('-v', '--verbose', action='store_true',
-                       help='Verbose output')
+                        help='Number of parallel imgproc workers (default: 3)')
+    parser.add_argument('--systemd', action='store_true',
+                        help='Enable systemd integration (journal logging, watchdog, notifications)')
+    parser.add_argument('--health-check', action='store_true',
+                        help='Print health status and exit')
+    parser.add_argument('-v', '--verbose', action='store_true')
 
-    # Output layout
-    parser.add_argument('--phdb-root', default='~/phdb',
-                       help='Root directory for ECSV output (default: ~/phdb)')
-    parser.add_argument('--phdb-date-fmt', default='%y%m', metavar='FMT',
-                       help='strftime format for ECSV subdirectory (default: %%y%%m)')
-    parser.add_argument('--png-root', default='~/png')
-    parser.add_argument('--daily-summary', metavar='DIR', dest='daily_summary_dir',
-                       help='Directory for nightly summary .dat files')
-
-    # Calibration
-    parser.add_argument('--smart-dark', metavar='CALIB.npy', dest='smart_dark_calib',
-                       help='Per-pixel dark model (.npy); bypasses master dark+flat')
-    parser.add_argument('--pixel-scale', type=float, metavar='ARCSEC',
-                       help='Pixel scale hint for pyrt-field-solve (arcsec/px)')
-
-    # Photometry
-    parser.add_argument('--dophot-model', metavar='FILE')
-    parser.add_argument('--dophot-catalog', metavar='NAME')
-    parser.add_argument('--dophot-maglim', type=float, metavar='N')
-    parser.add_argument('--dophot-enlarge', type=float, metavar='N')
-    parser.add_argument('--dophot-terms', metavar='TERMS')
-    parser.add_argument('--dophot-idlimit', type=int, metavar='N')
-    parser.add_argument('--dophot-max-stars', type=int, default=1000, metavar='N',
-                       help='Max stars for dophot (0 = no limit; default 1000)')
-
-    # Makak bundle
-    parser.add_argument('--makak', action='store_true', dest='makak_mode',
-                       help='Enable Makak-specific features: dark-frame detection, '
-                            '55"/px scale hint, -k in pyrt-dophot, mi0315 crop')
+    # Forwarded verbatim to asarina-imgproc
+    fwd = parser.add_argument_group('forwarded to asarina-imgproc')
+    fwd.add_argument('--ssh-key', required=True,
+                     help='Path to SSH private key for database upload')
+    fwd.add_argument('--realtime', action='store_true',
+                     help='Pass --realtime to imgproc (web preview, corrwerr, WCS-to-raw)')
+    fwd.add_argument('--phdb-root', default='~/phdb')
+    fwd.add_argument('--phdb-date-fmt', default='%y%m', metavar='FMT')
+    fwd.add_argument('--png-root', default='~/png')
+    fwd.add_argument('--daily-summary', metavar='DIR', dest='daily_summary_dir')
+    fwd.add_argument('--smart-dark', metavar='CALIB.npy', dest='smart_dark_calib')
+    fwd.add_argument('--pixel-scale', type=float, metavar='ARCSEC')
+    fwd.add_argument('--dophot-model', metavar='FILE')
+    fwd.add_argument('--dophot-catalog', metavar='NAME')
+    fwd.add_argument('--dophot-maglim', type=float, metavar='N')
+    fwd.add_argument('--dophot-enlarge', type=float, metavar='N')
+    fwd.add_argument('--dophot-terms', metavar='TERMS')
+    fwd.add_argument('--dophot-idlimit', type=int, metavar='N')
+    fwd.add_argument('--dophot-max-stars', type=int, default=1000, metavar='N')
+    fwd.add_argument('--makak', action='store_true', dest='makak_mode',
+                     help='Enable Makak-specific features')
+    fwd.add_argument('--sip', type=int, default=1, metavar='N')
+    fwd.add_argument('--passes', type=int, default=2, metavar='N')
+    fwd.add_argument('--sbt-window-patch', action='store_true')
+    fwd.add_argument('-f', '--force', action='store_true',
+                     help='Reprocess images even if ECSV already exists')
 
     args = parser.parse_args()
 
-    # Setup logging
     setup_logging(use_systemd=args.systemd, verbose=args.verbose)
 
-    if args.verbose:
-        logger.debug("Debug logging enabled")
-
-    # Handle health check
     if args.health_check:
-        # This could be expanded to check a running instance
         print("Service health check not implemented for standalone execution")
         sys.exit(0)
 
-    # Create and run pipeline
-    pipeline = AutomatedPipeline(
+    # Build the base imgproc command that will be prepended to each image path
+    imgproc_base = ['asarina-imgproc',
+                    '--ssh-key', args.ssh_key,
+                    '--phdb-root', args.phdb_root,
+                    '--phdb-date-fmt', args.phdb_date_fmt,
+                    '--png-root', args.png_root,
+                    '--dophot-max-stars', str(args.dophot_max_stars),
+                    '--sip', str(args.sip),
+                    '--passes', str(args.passes)]
+    if args.realtime:
+        imgproc_base += ['--realtime']
+    if args.daily_summary_dir:
+        imgproc_base += ['--daily-summary', args.daily_summary_dir]
+    if args.smart_dark_calib:
+        imgproc_base += ['--smart-dark', args.smart_dark_calib]
+    if args.pixel_scale:
+        imgproc_base += ['--pixel-scale', str(args.pixel_scale)]
+    if args.dophot_model:
+        imgproc_base += ['--dophot-model', args.dophot_model]
+    if args.dophot_catalog:
+        imgproc_base += ['--dophot-catalog', args.dophot_catalog]
+    if args.dophot_maglim:
+        imgproc_base += ['--dophot-maglim', str(args.dophot_maglim)]
+    if args.dophot_enlarge:
+        imgproc_base += ['--dophot-enlarge', str(args.dophot_enlarge)]
+    if args.dophot_terms:
+        imgproc_base += ['--dophot-terms', args.dophot_terms]
+    if args.dophot_idlimit:
+        imgproc_base += ['--dophot-idlimit', str(args.dophot_idlimit)]
+    if args.makak_mode:
+        imgproc_base += ['--makak']
+    if args.sbt_window_patch:
+        imgproc_base += ['--sbt-window-patch']
+    if args.force:
+        imgproc_base += ['-f']
+    if args.verbose:
+        imgproc_base += ['-v']
+
+    watcher = AutomatedPipeline(
         use_systemd=args.systemd,
         png_cleanup_days=args.png_cleanup_days,
         cleanup_interval_hours=args.cleanup_interval_hours,
-        cleanup_ecsv=not args.no_cleanup,
-        run_transients=args.run_transients,
-        ssh_key=args.ssh_key,
-        phdb_root=args.phdb_root,
-        phdb_date_fmt=args.phdb_date_fmt,
-        png_root=args.png_root,
-        daily_summary_dir=args.daily_summary_dir,
-        smart_dark_calib=args.smart_dark_calib,
-        pixel_scale=args.pixel_scale,
-        dophot_model=args.dophot_model,
-        dophot_catalog=args.dophot_catalog,
-        dophot_maglim=args.dophot_maglim,
-        dophot_enlarge=args.dophot_enlarge,
-        dophot_terms=args.dophot_terms,
-        dophot_idlimit=args.dophot_idlimit,
-        dophot_max_stars=args.dophot_max_stars,
-        makak_mode=args.makak_mode,
-#        fast=args.fast
+        max_workers=args.max_workers,
+        imgproc_base=imgproc_base,
     )
-    
-    # Update monitor settings
-    pipeline.monitor.search_root = Path(args.search_root)
-    pipeline.monitor.camera_pattern = args.camera_pattern
-    pipeline.monitor.poll_interval = args.poll_interval
-    
-    # Update transient searcher
-    pipeline.pipeline.transient_searcher.transients_script = args.transients_script
-    
-    logger.info("Starting automated pipeline...")
+    watcher.monitor.search_root = Path(args.search_root)
+    watcher.monitor.camera_pattern = args.camera_pattern
+    watcher.monitor.poll_interval = args.poll_interval
+
+    logger.info(f"Starting watcher, imgproc base: {' '.join(imgproc_base)}")
     if args.systemd:
         logger.info("Systemd integration enabled")
-    
-    pipeline.run()
+
+    watcher.run()
 
 
 if __name__ == "__main__":
