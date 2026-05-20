@@ -47,28 +47,8 @@ observations belong to the same night entry.
 ## Batch reprocessing (replaces `do_reprocess.sh`)
 
 ```bash
-asarina-photometry \
-  --smart-dark /home/mates/makak-reloaded/makak-dark-response.npy \
-  --makak \
-  --phdb-root   /home/mates/makak-reloaded/ecsv \
-  --phdb-date-fmt '%Y%m%d' \
-  --daily-summary /home/mates/makak-reloaded/nght \
-  --dophot-model   /home/mates/makak-reloaded/model.mod \
-  --dophot-catalog makak \
-  --dophot-maglim  8 \
-  --dophot-enlarge 1.5 \
-  --dophot-terms   '.p4,.r4,RC,RO,RS' \
-  --dophot-idlimit 5 \
-  --dophot-max-stars 0 \
-  /storage/archive-images/MAKAK/images/2025/20250129/*.fits
-```
-
-For a full archive sweep:
-
-```bash
-find /storage/archive-images/MAKAK/images -name '*.fits' -print0 \
-  | sort -z \
-  | xargs -0 asarina-photometry \
+for f in /storage/archive-images/MAKAK/images/2025/20250129/*.fits; do
+    asarina-imgproc \
       --smart-dark /home/mates/makak-reloaded/makak-dark-response.npy \
       --makak \
       --phdb-root   /home/mates/makak-reloaded/ecsv \
@@ -80,7 +60,29 @@ find /storage/archive-images/MAKAK/images -name '*.fits' -print0 \
       --dophot-enlarge 1.5 \
       --dophot-terms   '.p4,.r4,RC,RO,RS' \
       --dophot-idlimit 5 \
-      --dophot-max-stars 0
+      --dophot-max-stars 0 \
+      "$f"
+done
+```
+
+For a full archive sweep in parallel:
+
+```bash
+find /storage/archive-images/MAKAK/images -name '*.fits' | sort | \
+  parallel -j4 asarina-imgproc \
+      --smart-dark /home/mates/makak-reloaded/makak-dark-response.npy \
+      --makak \
+      --phdb-root   /home/mates/makak-reloaded/ecsv \
+      --phdb-date-fmt '%Y%m%d' \
+      --daily-summary /home/mates/makak-reloaded/nght \
+      --dophot-model   /home/mates/makak-reloaded/model.mod \
+      --dophot-catalog makak \
+      --dophot-maglim  8 \
+      --dophot-enlarge 1.5 \
+      --dophot-terms   '.p4,.r4,RC,RO,RS' \
+      --dophot-idlimit 5 \
+      --dophot-max-stars 0 \
+      {}
 ```
 
 Already-processed files are skipped automatically (unless `-f`/`--force`).
@@ -88,7 +90,7 @@ Already-processed files are skipped automatically (unless `-f`/`--force`).
 ## Real-time daemon (replaces `makak-reloaded` live mode)
 
 ```bash
-asarina-pipeline \
+asarina-watch \
   --search-root /storage/archive-images/MAKAK/images \
   --camera-pattern '' \
   --smart-dark /home/mates/makak-reloaded/makak-dark-response.npy \

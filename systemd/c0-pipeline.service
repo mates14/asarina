@@ -12,8 +12,8 @@ User=mates
 Group=mates
 WorkingDirectory=/home/mates/pipeline
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
-ExecStart=asarina-watch --systemd --run-transients --camera-pattern C0
-#ExecStart=asarina-watch --systemd --camera-pattern C0
+ExecStart=asarina-watch --systemd --camera-pattern C0 --ssh-key /home/mates/.ssh/id_pipeline
+#ExecStart=asarina-watch --systemd --camera-pattern C0 --ssh-key /home/mates/.ssh/id_pipeline --realtime
 ExecReload=/bin/kill -HUP $MAINPID
 NoNewPrivileges=false
 
