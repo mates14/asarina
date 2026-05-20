@@ -143,15 +143,29 @@ asarina-watch \
 
 ## asarina-image — get calibrated FITS files
 
-For when you want to inspect or stack images yourself. Produces dark/flat-corrected FITS in an output directory. By default also runs solve+dophot and writes ECSV alongside; use `--no-photometry` for just the calibrated FITS.
+For when you want to inspect or stack images yourself. Produces dark/flat-corrected FITS (and optionally ECSV) in a local output directory — nothing goes to `~/phdb`.
 
 ```bash
-# Dark/flat correction only
+# Dark/flat correction only, standard cameras
 asarina-image --no-photometry -o ./corrected/ night/*.fits
 
-# Full calibration + astrometry + dophot, keep FITS
+# Full calibration + astrometry + dophot, keep FITS + ECSV locally
 asarina-image -o ./processed/ night/*.fits
+
+# Makak: smart-dark correction only
+asarina-image --no-photometry --smart-dark /home/mates/makak-reloaded/makak-dark-response.npy \
+    -o ./corrected/ 20260406*.fits
+
+# Makak: smart-dark + full solve/dophot
+asarina-image \
+    --smart-dark /home/mates/makak-reloaded/makak-dark-response.npy \
+    --makak \
+    --dophot-model /home/mates/makak-reloaded/model.mod \
+    --dophot-catalog makak \
+    -o ./processed/ 20260406*.fits
 ```
+
+`--smart-dark` and `--makak` bypass the master dark/flat database entirely and route calibration through the per-pixel dark model.
 
 ---
 

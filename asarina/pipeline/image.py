@@ -523,42 +523,130 @@ class ImageProcessor:
         return successful
 
 
+def _process_via_pipeline(pipeline, image_path: Path, output_dir: Path,
+                          no_photometry: bool, overwrite: bool) -> None:
+    """Process one image through PhotometryPipeline, writing results to output_dir.
+
+    Used when --smart-dark or --makak are given (the ImageProcessor master-dark
+    path is bypassed entirely).
+    """
+    from asarina.pipeline.ingest import PhotometryPipeline  # already imported by caller
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+
+        fits_file = pipeline.calibrate(image_path, tmp)
+        if fits_file is None:
+            return
+
+        output_fits = output_dir / fits_file
+
+        if no_photometry:
+            shutil.copy(str(tmp / fits_file), str(output_fits))
+            logger.info(f"Wrote {output_fits}")
+            return
+
+        if not pipeline.solve(fits_file, tmp):
+            logger.warning(f"{fits_file}: astrometric solve failed — skipped")
+            return
+
+        ecsv_name = pipeline.photometry(fits_file, tmp)
+        if ecsv_name is None:
+            logger.warning(f"{fits_file}: photometry/quality check failed — skipped")
+            return
+
+        dft_name = fits_file.replace('.fits', 't.fits')
+        if not (tmp / dft_name).exists():
+            logger.warning(f"{dft_name}: astrometrised FITS not found — skipped")
+            return
+
+        if output_fits.exists() and not overwrite:
+            logger.warning(f"{output_fits.name}: already exists, use --overwrite")
+            return
+
+        ecsv_output = output_fits.with_suffix('.ecsv')
+        shutil.move(str(tmp / dft_name), str(output_fits))
+        shutil.move(str(tmp / ecsv_name), str(ecsv_output))
+        logger.info(f"Wrote {output_fits.name} + {ecsv_output.name}")
+
+
 def main():
     """Command line interface."""
     parser = argparse.ArgumentParser(
-        description="Correct astronomical images with darks+flats"
+        description="Produce calibrated FITS files (dark/flat correction + optional solve/dophot)"
     )
     parser.add_argument('files', nargs='+', help='Input FITS files')
     parser.add_argument('-o', '--output-dir', default='.',
                        help='Output directory (default: current directory)')
     parser.add_argument('--overwrite', action='store_true',
                        help='Overwrite existing output files')
-    parser.add_argument('--temp-grouping', type=int, default=5,
-                       help='Temperature grouping for darks (default: 5)')
-    parser.add_argument('--exposure-tolerance', type=float, default=3.0,
-                       help='Maximum exposure time difference for dark matching (default: 3.0)')
-    parser.add_argument('--calib-dir', default='/home/mates/flat{year}/',
-                       help='Calibration directory template with {year} placeholder '
-                            '(default: /home/mates/flat{year}/)')
     parser.add_argument('--no-photometry', action='store_true',
                        help='Skip solve+photometry; write dark/flat-corrected FITS only')
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Verbose output')
+
+    std = parser.add_argument_group('standard calibration (master dark/flat)')
+    std.add_argument('--temp-grouping', type=int, default=5,
+                     help='Temperature grouping for darks (default: 5)')
+    std.add_argument('--exposure-tolerance', type=float, default=3.0,
+                     help='Max exposure time difference for dark matching (default: 3.0)')
+    std.add_argument('--calib-dir', default='/home/mates/flat{year}/',
+                     help='Calibration directory template (default: /home/mates/flat{year}/)')
+
+    alt = parser.add_argument_group('alternative calibration / camera')
+    alt.add_argument('--smart-dark', metavar='CALIB.npy', dest='smart_dark_calib',
+                     help='Per-pixel dark model; bypasses master dark+flat entirely')
+    alt.add_argument('--makak', action='store_true', dest='makak_mode',
+                     help='Makak camera: dark-frame detection, 55"/px hint, mi0315 crop')
+    alt.add_argument('--pixel-scale', type=float, metavar='ARCSEC',
+                     help='Pixel scale hint for pyrt-field-solve (arcsec/px)')
+
+    phot = parser.add_argument_group('photometry (pyrt-dophot)')
+    phot.add_argument('--dophot-model', metavar='FILE')
+    phot.add_argument('--dophot-catalog', metavar='NAME')
+    phot.add_argument('--dophot-maglim', type=float, metavar='N')
+    phot.add_argument('--dophot-enlarge', type=float, metavar='N')
+    phot.add_argument('--dophot-terms', metavar='TERMS')
+    phot.add_argument('--dophot-idlimit', type=int, metavar='N')
+    phot.add_argument('--dophot-max-stars', type=int, default=1000, metavar='N')
 
     args = parser.parse_args()
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    processor = ImageProcessor(
-        temp_grouping=args.temp_grouping,
-        exposure_tolerance=args.exposure_tolerance,
-        calib_dir_template=args.calib_dir
-    )
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    processor.load_calibration_frames(args.files)
-    processor.process_all_objects(args.output_dir, args.overwrite,
-                                  photometry=not args.no_photometry)
+    if args.smart_dark_calib or args.makak_mode:
+        # Smart-dark / Makak: ImageProcessor master-dark path is wrong here;
+        # route everything through PhotometryPipeline which owns the smart-dark branch.
+        from asarina.pipeline.ingest import PhotometryPipeline
+        pipeline = PhotometryPipeline(
+            smart_dark_calib=args.smart_dark_calib,
+            makak_mode=args.makak_mode,
+            pixel_scale=args.pixel_scale,
+            dophot_model=args.dophot_model,
+            dophot_catalog=args.dophot_catalog,
+            dophot_maglim=args.dophot_maglim,
+            dophot_enlarge=args.dophot_enlarge,
+            dophot_terms=args.dophot_terms,
+            dophot_idlimit=args.dophot_idlimit,
+            dophot_max_stars=args.dophot_max_stars,
+        )
+        for f in args.files:
+            _process_via_pipeline(pipeline, Path(f), output_dir,
+                                  args.no_photometry, args.overwrite)
+    else:
+        # Standard path: ImageProcessor finds and applies master darks/flats,
+        # then optionally hands off to PhotometryPipeline for solve+dophot.
+        processor = ImageProcessor(
+            temp_grouping=args.temp_grouping,
+            exposure_tolerance=args.exposure_tolerance,
+            calib_dir_template=args.calib_dir
+        )
+        processor.load_calibration_frames(args.files)
+        processor.process_all_objects(args.output_dir, args.overwrite,
+                                      photometry=not args.no_photometry)
 
 
 if __name__ == "__main__":
