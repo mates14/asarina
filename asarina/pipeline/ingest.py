@@ -176,8 +176,17 @@ class PhotometryPipeline:
         or None on failure.
         """
         if self.smart_dark_calib:
-            return self._calibrate_smart_dark(image_path, temp_dir)
-        return self._calibrate_standard(image_path, temp_dir)
+            result = self._calibrate_smart_dark(image_path, temp_dir)
+        else:
+            result = self._calibrate_standard(image_path, temp_dir)
+
+        if result is not None and self.makak_mode:
+            cal_path = temp_dir / result
+            with fits.open(str(cal_path), mode='update') as hdul:
+                if 'CCD_NAME' not in hdul[0].header:
+                    hdul[0].header['CCD_NAME'] = 'makak'
+
+        return result
 
     def solve(self, fits_file: str, temp_dir: Path) -> bool:
         """Source detection + astrometric solve.
