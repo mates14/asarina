@@ -374,6 +374,9 @@ def main():
     output.add_argument('--png-root', default='/home/mates/png')
     output.add_argument('--daily-summary', metavar='DIR', dest='daily_summary_dir',
                         help='Directory for nightly summary .dat files')
+    output.add_argument('--stat-dir', metavar='DIR', dest='stat_dir',
+                        help='Directory for per-night photometric stat ECSVs '
+                             '(default: RTS2_STAT_DIR env var, or disabled if unset)')
 
     calib = parser.add_argument_group('calibration')
     calib.add_argument('--smart-dark', metavar='CALIB.npy', dest='smart_dark_calib',
@@ -419,6 +422,7 @@ def main():
         png_root=args.png_root,
         phdb_date_fmt=args.phdb_date_fmt,
         daily_summary_dir=args.daily_summary_dir,
+        stat_dir=args.stat_dir,
         smart_dark_calib=args.smart_dark_calib,
         pixel_scale=args.pixel_scale,
         dophot_model=args.dophot_model,

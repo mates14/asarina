@@ -392,6 +392,8 @@ def main():
     fwd.add_argument('--phdb-date-fmt', default='%y%m', metavar='FMT')
     fwd.add_argument('--png-root', default='~/png')
     fwd.add_argument('--daily-summary', metavar='DIR', dest='daily_summary_dir')
+    fwd.add_argument('--stat-dir', metavar='DIR', dest='stat_dir',
+                     help='Directory for per-night photometric stat ECSVs')
     fwd.add_argument('--smart-dark', metavar='CALIB.npy', dest='smart_dark_calib')
     fwd.add_argument('--pixel-scale', type=float, metavar='ARCSEC')
     fwd.add_argument('--dophot-model', metavar='FILE')
@@ -430,6 +432,8 @@ def main():
         imgproc_base += ['--realtime']
     if args.daily_summary_dir:
         imgproc_base += ['--daily-summary', args.daily_summary_dir]
+    if args.stat_dir:
+        imgproc_base += ['--stat-dir', args.stat_dir]
     if args.smart_dark_calib:
         imgproc_base += ['--smart-dark', args.smart_dark_calib]
     if args.pixel_scale:

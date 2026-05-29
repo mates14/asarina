@@ -32,6 +32,7 @@ class PhotometryPipeline:
                  # Output layout
                  phdb_date_fmt: str = "%y%m",
                  daily_summary_dir: str = None,
+                 stat_dir: str = None,
                  # Photometry overrides
                  dophot_model: str = None,
                  dophot_catalog: str = None,
@@ -52,6 +53,13 @@ class PhotometryPipeline:
         self.pixel_scale = pixel_scale
         self.phdb_date_fmt = phdb_date_fmt
         self.daily_summary_dir = Path(daily_summary_dir) if daily_summary_dir else None
+        # stat_dir: where per-night stat ECSVs are written.
+        # None disables stat logging.  Can also be set via RTS2_STAT_DIR env var.
+        self.stat_dir = (
+            Path(stat_dir).expanduser() if stat_dir is not None
+            else (Path(os.environ['RTS2_STAT_DIR']).expanduser()
+                  if 'RTS2_STAT_DIR' in os.environ else None)
+        )
 
         self.dophot_model = dophot_model
         self.dophot_catalog = dophot_catalog
@@ -462,6 +470,21 @@ class PhotometryPipeline:
         except Exception as e:
             logger.error(f"Error processing dark frame {image_path.name}: {e}")
 
+    def _write_stat(self, ecsv_path: str) -> None:
+        """Write a stat record for a successfully processed image."""
+        if self.stat_dir is None:
+            return
+        try:
+            from rtspy.observe.stat import record_from_ecsv, write_stat_record
+            record = record_from_ecsv(ecsv_path)
+            if record is not None:
+                write_stat_record(record, stat_dir=str(self.stat_dir))
+                logger.debug(f"Stat record written for {record['image']}")
+            else:
+                logger.warning(f"Could not extract stat record from {ecsv_path}")
+        except Exception as e:
+            logger.warning(f"Stat write failed for {ecsv_path}: {e}")
+
     # ------------------------------------------------------------------
     # High-level entry point (used by watch)
     # ------------------------------------------------------------------
@@ -514,7 +537,9 @@ class PhotometryPipeline:
             if ecsv is None:
                 return None
 
-            return self.save_results(ecsv, temp_dir, ctime, keep_image)
+            result = self.save_results(ecsv, temp_dir, ctime, keep_image)
+            self._write_stat(result[0])
+            return result
 
     def process_images(self, image_paths: List[str], force: bool = False,
                        keep_image: bool = False) -> List[str]:
