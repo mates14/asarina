@@ -34,21 +34,39 @@ logger = logging.getLogger(__name__)
 
 class ImageProcessor:
     """Astronomical image processing pipeline for dark/flat calibration."""
-    
+
     def __init__(self, temp_grouping: int = 5, exposure_tolerance: float = 3.0,
                  calib_dir_template: str = "/home/mates/flat{year}/",
                  calib_root: str = None,
-                 max_year_search: int = 5):
+                 max_year_search: int = 5,
+                 sip: int = 1,
+                 passes: int = 2,
+                 dophot_model: str = None,
+                 dophot_catalog: str = None,
+                 dophot_maglim: float = None,
+                 dophot_enlarge: float = None,
+                 dophot_terms: str = None,
+                 dophot_idlimit: int = None,
+                 dophot_max_stars: int = 1000):
         self.temp_grouping = temp_grouping
         self.exposure_tolerance = exposure_tolerance
         self.calib_dir_template = calib_dir_template
         self.max_year_search = max_year_search
         self.calib_root = Path(calib_root) if calib_root else Path.home() / 'calib'
+        self.sip = sip
+        self.passes = passes
+        self.dophot_model = dophot_model
+        self.dophot_catalog = dophot_catalog
+        self.dophot_maglim = dophot_maglim
+        self.dophot_enlarge = dophot_enlarge
+        self.dophot_terms = dophot_terms
+        self.dophot_idlimit = dophot_idlimit
+        self.dophot_max_stars = dophot_max_stars
         self.master_darks = {}
         self.master_flats = {}
         self.objects = []
-        self.loaded_files = set()  # Track loaded files to avoid duplicates
-        self.loaded_calib_years = set()  # Track which years' calib dirs were loaded
+        self.loaded_files = set()
+        self.loaded_calib_years = set()
         self.observation_year = None
         self.ccd_name = None
         self.chip_id = None
@@ -467,7 +485,15 @@ class ImageProcessor:
 
             # --- solve + photometry; write only on quality-checked success ---
             from asarina.pipeline.ingest import PhotometryPipeline  # local: avoids circular import
-            pipeline = PhotometryPipeline()
+            pipeline = PhotometryPipeline(
+                dophot_model=self.dophot_model,
+                dophot_catalog=self.dophot_catalog,
+                dophot_maglim=self.dophot_maglim,
+                dophot_enlarge=self.dophot_enlarge,
+                dophot_terms=self.dophot_terms,
+                dophot_idlimit=self.dophot_idlimit,
+                dophot_max_stars=self.dophot_max_stars,
+            )
 
             with tempfile.TemporaryDirectory() as tmp_str:
                 tmp = Path(tmp_str)
@@ -477,7 +503,8 @@ class ImageProcessor:
                     logger.warning(f"{output_name}: astrometric solve failed — skipped")
                     return None
 
-                ecsv_name = pipeline.photometry(output_name, tmp)
+                ecsv_name = pipeline.photometry(output_name, tmp,
+                                                sip=self.sip, passes=self.passes)
                 if ecsv_name is None:
                     logger.warning(f"{output_name}: photometry/quality check failed — skipped")
                     return None
@@ -524,7 +551,8 @@ class ImageProcessor:
 
 
 def _process_via_pipeline(pipeline, image_path: Path, output_dir: Path,
-                          no_photometry: bool, overwrite: bool) -> None:
+                          no_photometry: bool, overwrite: bool,
+                          sip: int = 1, passes: int = 2) -> None:
     """Process one image through PhotometryPipeline, writing results to output_dir.
 
     Used when --smart-dark or --makak are given (the ImageProcessor master-dark
@@ -549,7 +577,7 @@ def _process_via_pipeline(pipeline, image_path: Path, output_dir: Path,
             logger.warning(f"{fits_file}: astrometric solve failed — skipped")
             return
 
-        ecsv_name = pipeline.photometry(fits_file, tmp)
+        ecsv_name = pipeline.photometry(fits_file, tmp, sip=sip, passes=passes)
         if ecsv_name is None:
             logger.warning(f"{fits_file}: photometry/quality check failed — skipped")
             return
@@ -571,6 +599,12 @@ def _process_via_pipeline(pipeline, image_path: Path, output_dir: Path,
 
 def main():
     """Command line interface."""
+    from asarina.config import pre_parse, load_config, as_argparse_defaults, SYSTEM_CONFIG_FILE, USER_CONFIG_FILE
+
+    config_file, camera, remaining = pre_parse()
+    cfg = load_config(config_file, camera)
+    defaults = as_argparse_defaults(cfg)
+
     parser = argparse.ArgumentParser(
         description="Produce calibrated FITS files (dark/flat correction + optional solve/dophot)"
     )
@@ -593,14 +627,18 @@ def main():
                      help='Calibration directory template (default: /home/mates/flat{year}/)')
 
     alt = parser.add_argument_group('alternative calibration / camera')
-    alt.add_argument('--smart-dark', metavar='CALIB.npy', dest='smart_dark_calib',
+    alt.add_argument('--smart-dark', metavar='CALIB.npy',
                      help='Per-pixel dark model; bypasses master dark+flat entirely')
-    alt.add_argument('--makak', action='store_true', dest='makak_mode',
+    alt.add_argument('--makak', action='store_true',
                      help='Makak camera: dark-frame detection, 55"/px hint, mi0315 crop')
     alt.add_argument('--pixel-scale', type=float, metavar='ARCSEC',
                      help='Pixel scale hint for pyrt-field-solve (arcsec/px)')
 
     phot = parser.add_argument_group('photometry (pyrt-dophot)')
+    phot.add_argument('--sip', type=int, default=1, metavar='N',
+                      help='SIP polynomial order for pyrt-dophot (default: 1)')
+    phot.add_argument('--passes', type=int, default=2, metavar='N',
+                      help='Number of pyrt-dophot passes (default: 2)')
     phot.add_argument('--dophot-model', metavar='FILE')
     phot.add_argument('--dophot-catalog', metavar='NAME')
     phot.add_argument('--dophot-maglim', type=float, metavar='N')
@@ -609,7 +647,15 @@ def main():
     phot.add_argument('--dophot-idlimit', type=int, metavar='N')
     phot.add_argument('--dophot-max-stars', type=int, default=1000, metavar='N')
 
-    args = parser.parse_args()
+    cfg_grp = parser.add_argument_group('configuration')
+    cfg_grp.add_argument('--config', metavar='FILE',
+                         help=f'Config file (overrides cascade: {SYSTEM_CONFIG_FILE}, {USER_CONFIG_FILE})')
+    cfg_grp.add_argument('--camera', metavar='NAME',
+                         help='Camera section in config to apply '
+                              '(default: auto-detected from CCD_NAME header)')
+
+    parser.set_defaults(**defaults)
+    args = parser.parse_args(remaining)
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
@@ -617,13 +663,13 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.smart_dark_calib or args.makak_mode:
+    if args.smart_dark or args.makak:
         # Smart-dark / Makak: ImageProcessor master-dark path is wrong here;
         # route everything through PhotometryPipeline which owns the smart-dark branch.
         from asarina.pipeline.ingest import PhotometryPipeline
         pipeline = PhotometryPipeline(
-            smart_dark_calib=args.smart_dark_calib,
-            makak_mode=args.makak_mode,
+            smart_dark_calib=args.smart_dark,
+            makak_mode=args.makak,
             pixel_scale=args.pixel_scale,
             dophot_model=args.dophot_model,
             dophot_catalog=args.dophot_catalog,
@@ -635,14 +681,24 @@ def main():
         )
         for f in args.files:
             _process_via_pipeline(pipeline, Path(f), output_dir,
-                                  args.no_photometry, args.overwrite)
+                                  args.no_photometry, args.overwrite,
+                                  sip=args.sip, passes=args.passes)
     else:
         # Standard path: ImageProcessor finds and applies master darks/flats,
         # then optionally hands off to PhotometryPipeline for solve+dophot.
         processor = ImageProcessor(
             temp_grouping=args.temp_grouping,
             exposure_tolerance=args.exposure_tolerance,
-            calib_dir_template=args.calib_dir
+            calib_dir_template=args.calib_dir,
+            sip=args.sip,
+            passes=args.passes,
+            dophot_model=args.dophot_model,
+            dophot_catalog=args.dophot_catalog,
+            dophot_maglim=args.dophot_maglim,
+            dophot_enlarge=args.dophot_enlarge,
+            dophot_terms=args.dophot_terms,
+            dophot_idlimit=args.dophot_idlimit,
+            dophot_max_stars=args.dophot_max_stars,
         )
         processor.load_calibration_frames(args.files)
         processor.process_all_objects(args.output_dir, args.overwrite,

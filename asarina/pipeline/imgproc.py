@@ -349,6 +349,12 @@ def _drop_privileges(username: str) -> None:
 
 def main():
     import argparse
+    from asarina.config import pre_parse, load_config, as_argparse_defaults, SYSTEM_CONFIG_FILE, USER_CONFIG_FILE
+
+    config_file, camera, remaining = pre_parse()
+    cfg = load_config(config_file, camera)
+    defaults = as_argparse_defaults(cfg)
+
     parser = argparse.ArgumentParser(description="RTS2 imgproc pipeline")
     parser.add_argument('fits_file', help='Raw FITS image')
     parser.add_argument('-f', '--force', action='store_true',
@@ -379,7 +385,7 @@ def main():
                              '(default: RTS2_STAT_DIR env var, or disabled if unset)')
 
     calib = parser.add_argument_group('calibration')
-    calib.add_argument('--smart-dark', metavar='CALIB.npy', dest='smart_dark_calib',
+    calib.add_argument('--smart-dark', metavar='CALIB.npy',
                        help='Per-pixel dark model (.npy); bypasses master dark+flat')
 
     solve = parser.add_argument_group('astrometric solve')
@@ -395,11 +401,19 @@ def main():
     phot.add_argument('--dophot-idlimit', type=int, metavar='N')
     phot.add_argument('--dophot-max-stars', type=int, default=1000, metavar='N',
                       help='Max stars for dophot (0 = no limit; default 1000)')
-    phot.add_argument('--makak', action='store_true', dest='makak_mode',
+    phot.add_argument('--makak', action='store_true',
                       help='Enable Makak-specific features: dark-frame detection, '
                            '55\"/px scale hint, -k in pyrt-dophot, mi0315 crop')
 
-    args = parser.parse_args()
+    cfg_grp = parser.add_argument_group('configuration')
+    cfg_grp.add_argument('--config', metavar='FILE',
+                         help=f'Config file (overrides cascade: {SYSTEM_CONFIG_FILE}, {USER_CONFIG_FILE})')
+    cfg_grp.add_argument('--camera', metavar='NAME',
+                         help='Camera section in config to apply '
+                              '(default: auto-detected from CCD_NAME header)')
+
+    parser.set_defaults(**defaults)
+    args = parser.parse_args(remaining)
 
     logging.basicConfig(stream=sys.stderr, format='%(levelname)s %(name)s: %(message)s')
     logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.INFO)
@@ -423,7 +437,7 @@ def main():
         phdb_date_fmt=args.phdb_date_fmt,
         daily_summary_dir=args.daily_summary_dir,
         stat_dir=args.stat_dir,
-        smart_dark_calib=args.smart_dark_calib,
+        smart_dark_calib=args.smart_dark,
         pixel_scale=args.pixel_scale,
         dophot_model=args.dophot_model,
         dophot_catalog=args.dophot_catalog,
@@ -432,7 +446,7 @@ def main():
         dophot_terms=args.dophot_terms,
         dophot_idlimit=args.dophot_idlimit,
         dophot_max_stars=args.dophot_max_stars,
-        makak_mode=args.makak_mode,
+        makak_mode=args.makak,
     )
 
     if not args.force:
