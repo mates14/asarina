@@ -44,7 +44,7 @@ from asarina.observe.bg_predict import (
 def _held_out_test(data: pd.DataFrame, model_file: str, held_frac: float = 0.20) -> None:
     """Evaluate the trained model on the most recent held_frac of stat data."""
     data = data[
-        (data['exptime'] > 0) & (data['bgnoise'] > 0) &
+        (data['exptime'] >= 1) & (data['bgnoise'] > 0) &
         (data['airmass'] > 0) & (data['jd'] > 2400000)
     ].copy()
 
@@ -122,6 +122,11 @@ def main():
     print(f"Hardware          : GAIN={cfg.gain}  RN={cfg.readnoise}  APE={cfg.ape}")
     print(f"Filters           : {list(cfg.filter_params.keys())}")
     print()
+
+    before = len(data)
+    data = data[data['exptime'] >= 1].reset_index(drop=True)
+    if len(data) < before:
+        print(f"Dropped {before - len(data):,} records with exptime < 1 s  ({len(data):,} remain)")
 
     t0 = time.time()
     train_model(data, model_file, verbose=True)

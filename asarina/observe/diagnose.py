@@ -188,7 +188,7 @@ def main():
         print(f"Camera {args.camera}: no camera column — using all {len(data):,} records")
 
     data = data[
-        (data['exptime'] > 0) & (data['bgnoise'] > 0) &
+        (data['exptime'] >= 1) & (data['bgnoise'] > 0) &
         (data['airmass'] > 0) & (data['jd'] > 2400000) &
         (data['zp_1s'] > 5) & (data['zp_1s'] < 30)
     ].reset_index(drop=True)
