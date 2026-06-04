@@ -40,12 +40,12 @@ def log_magerror(magnitude, bgsigma, fwhm):
     return sbl(0.2, 0.4, 2.5, magnitude - break_mag) + 0.2*break_mag - 2
 
 def sky_brightness_from_bgsigma(bgsigma_ref, exptime_ref):
-    """Convert reference bgsigma to sky brightness (photons/s/pixel)."""
-    return (GAIN**2 * bgsigma_ref**2 - GAIN**2 * RN**2) / exptime_ref
+    """bgsigma [ADU] + exptime [s] → sky brightness [e-/s/pixel]."""
+    return max((GAIN**2 * bgsigma_ref**2 - RN**2) / exptime_ref, 0.0)
 
 def bgsigma_from_sky_brightness(sky_brightness, exptime):
-    """Calculate bgsigma for given exposure time and sky brightness."""
-    return np.sqrt(sky_brightness * exptime / GAIN**2 + RN**2)
+    """sky brightness [e-/s/pixel] + exptime [s] → bgsigma [ADU]."""
+    return np.sqrt((sky_brightness * exptime + RN**2) / GAIN**2)
 
 def read_reference_image(refimg_path):
     """Extract reference conditions from ecsv file header."""
@@ -239,14 +239,16 @@ class ExposureCalculator:
         self.ape       = ape
 
     def bgsigma_from_sky_brightness(self, sky_brightness: float, exptime: float) -> float:
-        return np.sqrt(sky_brightness * exptime / self.gain**2 + self.readnoise**2)
+        """sky_brightness [e-/s/px] → bgsigma [ADU]."""
+        return np.sqrt((sky_brightness * exptime + self.readnoise**2) / self.gain**2)
 
     def sky_brightness_from_bgsigma(self, bgsigma_ref: float, exptime_ref: float) -> float:
-        return (self.gain**2 * bgsigma_ref**2 - self.gain**2 * self.readnoise**2) / exptime_ref
+        """bgsigma [ADU] → sky_brightness [e-/s/px]."""
+        return max((self.gain**2 * bgsigma_ref**2 - self.readnoise**2) / exptime_ref, 0.0)
 
     def sky_1s_from_bgnoise(self, bgnoise_1s: float) -> float:
-        """bgnoise_1s [ADU] → sky_1s [photons/s/pixel]."""
-        return max(self.gain**2 * bgnoise_1s**2 - self.gain**2 * self.readnoise**2, 0.5)
+        """bgnoise_1s [ADU/sqrt(s)] → sky_1s [e-/s/px], sky-limited approximation."""
+        return self.gain**2 * bgnoise_1s**2
 
     def _break_magnitude(self, bgsigma: float, fwhm: float) -> float:
         return -2.5 * np.log10(self.ape * np.pi / 4 * fwhm**2 * (bgsigma * self.gain)**2) + ZERO

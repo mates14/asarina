@@ -40,17 +40,20 @@ Required FITS header keywords (in the ECSV metadata):
     MAGZERO   -- photometric zeropoint for this exposure in calculator-
                  internal units (= absolute_zp_for_exptime − ZERO, where ZERO = 10)
 
+Optional header keywords:
+    CCD_NAME  -- camera identifier; used by --camera to filter to one camera
+
 Required table columns:
     MAG_CALIB    -- calibrated star magnitude
     MAGERR_CALIB -- measured magnitude error
     FLAGS        -- SExtractor extraction flags (0 = clean)
 
-The formula uses  mag_rel = MAG_CALIB − MAGZERO  directly.
+The formula uses  mag_rel = MAG_CALIB − MAGZERO + ZERO  (ZERO = 10).
 
 Usage (CLI)
 -----------
-    rtspy-observe-apecalfit --data '/path/to/*.ecsv'
-    rtspy-observe-apecalfit --data '/path/to/*.ecsv' --config telescope.yaml --update-config
+    asarina-observe-apecalfit /data/2501/*-df.ecsv --camera C2
+    asarina-observe-apecalfit /data/2501/*-df.ecsv --camera C2 --output residuals.png
 
 Usage (library)
 ---------------
@@ -65,10 +68,10 @@ Workflow for a new telescope
 1. Reduce a set of calibration frames through the photometric pipeline.
 2. Collect the resulting per-image *-df.ecsv / *-dft.ecsv output files.
 3. Run this script:
-       rtspy-observe-apecalfit --data '/path/*.ecsv' --config telescope.yaml --update-config
-4. Also update default_fwhm in the YAML to match the reported median_fwhm.
+       asarina-observe-apecalfit /data/*.ecsv --camera C2
+4. Also update default_fwhm in the config to match the reported median_fwhm.
 5. Re-train the background model:
-       rtspy-observe-train --stat stat.txt --config telescope.yaml
+       asarina-observe-train ~/phdb/stat/*.ecsv --camera C2
 """
 
 import argparse
@@ -135,11 +138,14 @@ def _load_one(path: str) -> Optional[Table]:
     for k in required_meta:
         t[k] = float(t.meta[k])
 
+    t['CCD_NAME'] = str(t.meta.get('CCD_NAME', ''))
+
     return t
 
 
 def load_catalogs(
     paths: Union[str, List[str]],
+    camera: Optional[str] = None,
     max_flags: int = MAX_FLAGS,
     min_magerr: float = MIN_MAGERR,
     max_magerr: float = MAX_MAGERR,
@@ -152,7 +158,8 @@ def load_catalogs(
 
     Parameters
     ----------
-    paths : path string, glob pattern, or list of paths
+    paths  : path string, glob pattern, or list of paths
+    camera : if given, keep only catalogs whose CCD_NAME header matches
 
     Returns a dict of equal-length numpy arrays:
         mag_rel, bgsigma, fwhm, gain, log_magerr_obs, n_total, n_good
@@ -165,25 +172,41 @@ def load_catalogs(
     tables = []
     n_files = 0
     n_total = 0
+    n_skipped_camera = 0
     for p in paths:
         t = _load_one(p)
-        if t is not None:
-            tables.append(t)
-            n_files += 1
-            n_total += len(t)
+        if t is None:
+            continue
+        if camera is not None:
+            ccd = str(t.meta.get('CCD_NAME', '')).strip()
+            if ccd and ccd != camera:
+                n_skipped_camera += len(t)
+                continue
+        tables.append(t)
+        n_files += 1
+        n_total += len(t)
+
+    if camera is not None and verbose and n_skipped_camera:
+        print(f"Camera filter ({camera}): skipped {n_skipped_camera:,} stars from other cameras")
 
     if not tables:
-        raise RuntimeError("No usable catalogs loaded.")
+        raise RuntimeError(
+            f"No usable catalogs loaded"
+            + (f" for camera {camera}" if camera else "") + "."
+        )
 
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         data = vstack(tables)
 
     if verbose:
-        print(f"Loaded {n_total:,} stars from {n_files} file(s)")
+        print(f"Loaded {n_total:,} stars from {n_files} file(s)"
+              + (f"  [camera={camera}]" if camera else ""))
 
     magerr  = np.asarray(data['MAGERR_CALIB'], dtype=float)
-    mag_rel = np.asarray(data['MAG_CALIB'],    dtype=float) - np.asarray(data['MAGZERO'], dtype=float)
+    # MAGZERO in the catalog header is the standard photometric zeropoint.
+    # The formula uses ZERO=10 internally, so mag_rel = MAG_CALIB - (MAGZERO - ZERO).
+    mag_rel = np.asarray(data['MAG_CALIB'],    dtype=float) - np.asarray(data['MAGZERO'], dtype=float) + ZERO
     bgsigma = np.asarray(data['BGSIGMA'],      dtype=float)
     fwhm    = np.asarray(data['FWHM'],         dtype=float)
     gain    = np.asarray(data['GAIN'],          dtype=float)
@@ -227,6 +250,7 @@ def load_catalogs(
 
 def fit_ape(
     paths: Union[str, List[str]],
+    camera: Optional[str] = None,
     ape_bounds: tuple = (0.5, 100.0),
     max_flags: int = MAX_FLAGS,
     min_magerr: float = MIN_MAGERR,
@@ -265,7 +289,7 @@ def fit_ape(
         print()
 
     data = load_catalogs(
-        paths, max_flags=max_flags,
+        paths, camera=camera, max_flags=max_flags,
         min_magerr=min_magerr, max_magerr=max_magerr,
         min_fwhm=min_fwhm, max_fwhm=max_fwhm, verbose=verbose,
     )
@@ -332,11 +356,11 @@ def main():
         description='Fit APE (aperture growth curve parameter) from per-image ECSV catalogs',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument('--data', required=True, metavar='GLOB',
-                        help='Per-image ECSV catalog(s) or glob pattern '
-                             '(e.g. /data/2501/*.ecsv)')
+    parser.add_argument('catalog_files', nargs='+', metavar='FILE',
+                        help='Per-image ECSV catalog files (e.g. /data/2501/*-df.ecsv)')
     parser.add_argument('--camera', default=None, metavar='NAME',
-                        help='Camera section in /etc/asarina/config (default: $ASARINA_CAMERA or C0)')
+                        help='Keep only catalogs whose CCD_NAME header matches NAME '
+                             '(e.g. C1, C2); default: use all')
     parser.add_argument('--min-magerr', type=float, default=MIN_MAGERR,
                         help='Minimum MAGERR_CALIB (exclude saturated stars)')
     parser.add_argument('--max-magerr', type=float, default=MAX_MAGERR,
@@ -353,13 +377,10 @@ def main():
                         help='Upper bound for APE search')
     args = parser.parse_args()
 
-    files = sorted(glob.glob(args.data)) or [args.data]
-    if not files or not any(True for _ in files):
-        print(f"ERROR: no files matching '{args.data}'", file=sys.stderr)
-        sys.exit(1)
-
+    camera = args.camera
     result = fit_ape(
-        files,
+        args.catalog_files,
+        camera=camera,
         ape_bounds=(args.ape_min, args.ape_max),
         max_flags=args.max_flags,
         min_magerr=args.min_magerr,
@@ -369,11 +390,12 @@ def main():
         verbose=True,
     )
 
-    print(f"\nUpdate /etc/asarina/config [{args.camera or 'C0'}]:")
+    cam_label = camera or 'C0'
+    print(f"\nUpdate /etc/asarina/config [{cam_label}]:")
     print(f"  ape = {result['ape']:.4f}")
     print(f"  default_fwhm = {round(result['median_fwhm'], 1)}")
     print("Then retrain the background model:")
-    print(f"  asarina-observe-train --stat stat.txt")
+    print(f"  asarina-observe-train ~/phdb/stat/*.ecsv --camera {cam_label}")
 
 
 if __name__ == '__main__':

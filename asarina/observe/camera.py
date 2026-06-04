@@ -14,7 +14,10 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from asarina.observe.expcalc import ExposureCalculator, GAIN, RN, APE
-from asarina.observe.zp_predict import FILTER_PARAMS, SANITY_LIMITS
+from asarina.observe.zp_predict import (
+    FILTER_PARAMS, SANITY_LIMITS,
+    filter_params_for, sanity_limits_for, _DEFAULT_ZP_R,
+)
 
 _DEFAULT_CAMERA = os.environ.get('ASARINA_CAMERA', 'C0')
 
@@ -45,6 +48,7 @@ class CameraConfig:
     ape:           float = APE
     default_fwhm:  float = 3.0
     pixel_scale:   Optional[float] = None
+    zp_r:          float = _DEFAULT_ZP_R
 
     filter_params:  Dict = field(default_factory=lambda: dict(FILTER_PARAMS))
     sanity_limits:  Dict = field(default_factory=lambda: dict(SANITY_LIMITS))
@@ -73,12 +77,16 @@ class CameraConfig:
         cfg.ape          = float(d.get('ape',          APE))
         cfg.default_fwhm = float(d.get('default_fwhm', 3.0))
         cfg.pixel_scale  = d.get('pixel_scale')   # already float or None from _coerce
-        cfg.filter_params = dict(FILTER_PARAMS)
-        cfg.sanity_limits = dict(SANITY_LIMITS)
+        cfg.zp_r          = float(d.get('zp_r', _DEFAULT_ZP_R))
+        cfg.filter_params = filter_params_for(cfg.zp_r)
+        cfg.sanity_limits  = sanity_limits_for(cfg.zp_r)
         cfg.filter_token  = dict(_FILTER_TOKEN)
-        cfg.model_file   = os.environ.get(
-            'RTS2_BGNOISE_MODEL',
-            str(Path(__file__).parent / 'bgnoise_model.pkl'),
+        system_model  = f'/etc/asarina/bgnoise_model_{name}.pkl'
+        package_model = str(Path(__file__).parent / f'bgnoise_model_{name}.pkl')
+        cfg.model_file = (
+            os.environ.get('RTS2_BGNOISE_MODEL')
+            or d.get('model_file')
+            or (system_model if os.path.exists(system_model) else package_model)
         )
         cfg._calc = ExposureCalculator(
             gain=cfg.gain, readnoise=cfg.readnoise, ape=cfg.ape,

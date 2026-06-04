@@ -70,6 +70,7 @@ _SCHEMA = [
     ('bgnoise',   'f4',  'ADU', 'Background RMS for actual exptime = BGSIGMA'),
     ('maglim',    'f4',  'mag', 'Limiting magnitude'),
     ('image',     'U96', '',    'FITS filename, deduplication key'),
+    ('camera',    'U16', '',    'Camera name (CCD_NAME from pipeline header)'),
     ('ra',        'f8',  'deg', 'Target RA J2000'),
     ('dec',       'f8',  'deg', 'Target Dec J2000'),
 ]
@@ -170,6 +171,7 @@ def record_from_ecsv(ecsv_path: str) -> Optional[dict]:
         'bgnoise':   float(m['BGSIGMA']),
         'maglim':    float(maglim),
         'image':     str(Path(m['FITSFILE']).name),
+        'camera':    str(m.get('CCD_NAME', '')),
         'ra':        float(m['OBJRA']),
         'dec':       float(m['OBJDEC']),
     }

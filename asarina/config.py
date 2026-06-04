@@ -24,6 +24,7 @@ Recognised keys (underscores or dashes interchangeable):
   dophot_max_stars  int    1000
   smart_dark        str
   stat_dir          str
+  model_file        str
   ssh_key           str
 
 Example /etc/asarina/config:
@@ -54,7 +55,7 @@ USER_CONFIG_FILE   = '~/.config/asarina/config'
 _BOOL_KEYS  = frozenset({'sbt_window_patch', 'makak'})
 _INT_KEYS   = frozenset({'sip', 'passes', 'dophot_idlimit', 'dophot_max_stars'})
 _FLOAT_KEYS = frozenset({'pixel_scale', 'dophot_maglim', 'dophot_enlarge',
-                          'gain', 'readnoise', 'ape', 'default_fwhm'})
+                          'gain', 'readnoise', 'ape', 'default_fwhm', 'zp_r'})
 
 
 def _norm(key: str) -> str:

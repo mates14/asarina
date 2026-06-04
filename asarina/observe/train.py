@@ -4,27 +4,26 @@ Training pipeline for the bgnoise background noise predictor.
 
 Usage
 -----
-    rtspy-observe-train --stat stat.txt --config telescope.yaml
-    rtspy-observe-train --stat stat.txt --config telescope.yaml --model out.pkl
-    rtspy-observe-train --stat stat.txt  # uses built-in D50/C0 config
+    asarina-observe-train ~/phdb/stat/*.ecsv
+    asarina-observe-train ~/phdb/stat/*.ecsv --model out.pkl
+    asarina-observe-train ~/phdb/stat/20250101.ecsv ~/phdb/stat/20250102.ecsv
 
 What it does
 ------------
-1. Loads telescope config (filter_params, sanity_limits, hardware constants).
-2. Trains HistGradientBoostingRegressor on stat.txt → predicts log(bgnoise_1s).
+1. Loads and concatenates the given per-night stat ECSV files.
+2. Trains HistGradientBoostingRegressor → predicts log(bgnoise_1s).
 3. Evaluates on a held-out set (most recent 20% by JD) and prints a summary.
 4. Saves the model to the path specified in --model or in the config.
 
 Workflow for a new telescope
 -----------------------------
-1. Collect stat.txt from the photometric pipeline.
+1. Collect stat ECSVs from ~/phdb/stat/ (written by the ingest pipeline).
 2. Run zpfit.py to fit Z0 and beta per filter.
 3. Fill in a config YAML (use config_d50_c0.yaml as a template).
 4. Run this script to train and evaluate the model.
 5. Deploy the config YAML + model file to the telescope.
    Set environment variables:
        export RTS2_OBSERVE_CONFIG=/path/to/telescope.yaml
-       export RTS2_STAT_FILE=/path/to/stat.txt
 """
 
 import argparse
@@ -32,22 +31,18 @@ import sys
 import time
 
 import numpy as np
+import pandas as pd
 
 from asarina.observe.camera import CameraConfig
+from asarina.observe.stat import read_stat
 from asarina.observe.bg_predict import (
     train_model, predict_background,
     _build_X, FEATURE_NAMES,
 )
 
 
-def _held_out_test(stat_file: str, model_file: str, held_frac: float = 0.20) -> None:
+def _held_out_test(data: pd.DataFrame, model_file: str, held_frac: float = 0.20) -> None:
     """Evaluate the trained model on the most recent held_frac of stat data."""
-    from asarina.observe.stat import read_stat
-    data = read_stat(stat_file)
-    if 'exposure' in data.columns and 'exptime' not in data.columns:
-        data = data.rename(columns={'exposure': 'exptime'})
-        data['zp_1s']      = data['zeropoint'] - 2.5 * np.log10(data['exptime'].clip(lower=1e-3))
-        data['bgnoise_1s'] = data['bgnoise'] / np.sqrt(data['exptime'].clip(lower=1e-3))
     data = data[
         (data['exptime'] > 0) & (data['bgnoise'] > 0) &
         (data['airmass'] > 0) & (data['jd'] > 2400000)
@@ -97,8 +92,8 @@ def main():
         description='Train bgnoise background predictor for a telescope',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument('--stat', required=True, metavar='FILE',
-                        help='Path to the pipeline stat.txt training file')
+    parser.add_argument('stat_files', nargs='+', metavar='FILE',
+                        help='Per-night stat ECSV files (e.g. ~/phdb/stat/*.ecsv)')
     parser.add_argument('--camera', metavar='NAME', default=None,
                         help='Camera section in /etc/asarina/config (default: $ASARINA_CAMERA or C0)')
     parser.add_argument('--model', metavar='FILE', default=None,
@@ -112,25 +107,32 @@ def main():
     cfg = CameraConfig.load(args.camera)
     model_file = args.model or cfg.model_file
 
-    print(f"Camera            : {args.camera or 'C0 (default)'}")
-    print(f"Training data     : {args.stat}")
+    frames = [read_stat(f) for f in args.stat_files]
+    data = pd.concat(frames, ignore_index=True).sort_values('jd').reset_index(drop=True)
+
+    camera_name = args.camera or 'C0'
+    if 'camera' in data.columns and data['camera'].str.len().gt(0).any():
+        before = len(data)
+        data = data[data['camera'] == camera_name].reset_index(drop=True)
+        print(f"Camera            : {camera_name}  ({len(data):,} of {before:,} records)")
+    else:
+        print(f"Camera            : {camera_name}  (no camera column in stat files — not filtered)")
+    print(f"Training data     : {len(args.stat_files)} file(s), {len(data):,} records")
     print(f"Model output      : {model_file}")
     print(f"Hardware          : GAIN={cfg.gain}  RN={cfg.readnoise}  APE={cfg.ape}")
     print(f"Filters           : {list(cfg.filter_params.keys())}")
     print()
 
     t0 = time.time()
-    train_model(args.stat, model_file, verbose=True)
+    train_model(data, model_file, verbose=True)
     elapsed = time.time() - t0
     print(f"\nTotal training time: {elapsed:.0f}s")
 
     if not args.no_test:
-        _held_out_test(args.stat, model_file, held_frac=args.held_frac)
+        _held_out_test(data, model_file, held_frac=args.held_frac)
 
-    print(f"\nDeploy: copy {model_file} to the telescope.")
-    print(f"  Set   export RTS2_BGNOISE_MODEL=/path/to/bgnoise_model.pkl")
-    print(f"  Set   export RTS2_STAT_FILE=/path/to/stat.txt")
-    print(f"  Run   rts2-observe -m <mag> -s <snr>")
+    print(f"\nDeploy: sudo cp {model_file} /etc/asarina/")
+    print(f"  Runtime picks up /etc/asarina/bgnoise_model_{camera_name}.pkl automatically.")
 
 
 if __name__ == '__main__':

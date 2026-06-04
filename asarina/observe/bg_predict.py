@@ -73,11 +73,14 @@ def night_fraction(jd):
 # ---------------------------------------------------------------------------
 # Filter encoding (ordinal, roughly by central wavelength)
 # ---------------------------------------------------------------------------
-FILTER_ORDER = ['Sloan_g', 'Sloan_r', 'Sloan_i', 'Sloan_z', 'N']
+FILTER_ORDER = ['B', 'Sloan_g', 'oiii', 'V', 'Sloan_r', 'R', 'halpha', 'sii', 'Sloan_i', 'I', 'Sloan_z', 'N']
+
+_FILTER_ALIASES = {'clear': 'N'}
 
 def _encode_filter(f):
+    f = _FILTER_ALIASES.get(str(f), str(f))
     try:
-        return float(FILTER_ORDER.index(str(f)))
+        return float(FILTER_ORDER.index(f))
     except ValueError:
         return float(len(FILTER_ORDER))
 
@@ -129,19 +132,20 @@ def _build_X(jd, sun_alt, moon_alt, airmass, filter_name, zp_1s,
 # ---------------------------------------------------------------------------
 
 def train_model(
-    stat_file: str = 'stat.txt',
+    stat_file=None,
     model_file: str = _DEFAULT_MODEL,
     verbose: bool = True,
 ) -> HistGradientBoostingRegressor:
     """
-    Train a gradient boosting model on stat.txt and save it.
+    Train a gradient boosting model on stat data and save it.
 
     The model predicts log(bgnoise_1s) to handle the wide dynamic range.
     Moon illumination is derived from the JD column so no external data needed.
 
     Parameters
     ----------
-    stat_file  : path to the stat.txt observations file
+    stat_file  : path/directory accepted by read_stat(), or a pd.DataFrame
+                 of already-loaded stat records (None → RTS2_STAT_DIR)
     model_file : where to write the trained model (joblib pickle)
     verbose    : print diagnostics and cross-validation results
 
@@ -149,8 +153,12 @@ def train_model(
     -------
     trained GradientBoostingRegressor (also saved to model_file)
     """
+    import pandas as pd
     from asarina.observe.stat import read_stat
-    data = read_stat(stat_file)
+    if isinstance(stat_file, pd.DataFrame):
+        data = stat_file.copy()
+    else:
+        data = read_stat(stat_file)
     # accept both 'exptime' (new ECSV) and legacy 'exposure' column name
     if 'exposure' in data.columns and 'exptime' not in data.columns:
         data = data.rename(columns={'exposure': 'exptime'})
@@ -158,7 +166,8 @@ def train_model(
         data['bgnoise_1s'] = data['bgnoise']   / np.sqrt(data['exptime'].clip(lower=1e-3))
     data = data[
         (data['exptime'] > 0) & (data['bgnoise'] > 0) &
-        (data['airmass'] > 0) & (data['jd'] > 2400000)
+        (data['airmass'] > 0) & (data['jd'] > 2400000) &
+        (data['zp_1s'] > 5) & (data['zp_1s'] < 30)
     ].copy()
 
     # Log target for regression (covers ~1 dex of dynamic range)
@@ -186,6 +195,7 @@ def train_model(
     # 10-20x faster than GradientBoostingRegressor on large datasets.
     # verbose=1 prints a progress line every iteration with remaining-time estimate.
     model = HistGradientBoostingRegressor(
+        loss='absolute_error',
         max_iter=400,
         max_depth=5,
         learning_rate=0.05,

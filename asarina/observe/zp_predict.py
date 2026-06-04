@@ -18,25 +18,58 @@ import numpy as np
 from typing import Union, List, Optional, Dict, Any
 
 # ---------------------------------------------------------------------------
-# Calibrated constants from production fit (fitted_parameters_production.txt)
+# Per-filter offsets from r-band (delta) and extinction coefficients (beta).
+#
+# delta = Z0_f - Z0_r  depends on filter transmission + CCD QE, not on
+#                      telescope aperture — safe to hardcode across telescopes.
+# beta               atmospheric extinction [mag/airmass]; Ondrejov literature.
+#
+# The absolute r-band zeropoint Z0_r is telescope+camera-specific and lives
+# in the per-camera config as  zp_r  (see /etc/asarina/config [C1]/[C2]).
+# Call filter_params_for(zp_r) to build {filter: {Z0, beta}} for predict_zeropoint().
+#
+# Deltas calibrated from SBT C1/C2 May–Jun 2026 stat data, with zp_r = 18.28.
 # ---------------------------------------------------------------------------
-FILTER_PARAMS: Dict[str, Dict[str, float]] = {
-    'Sloan_g': {'Z0': 21.919920, 'beta':  0.099949},
-    'Sloan_r': {'Z0': 21.937985, 'beta':  0.000000},  # reference band
-    'Sloan_i': {'Z0': 21.394691, 'beta': -0.067270},
-    'Sloan_z': {'Z0': 20.365853, 'beta': -0.056017},
-    'N':       {'Z0': 22.986458, 'beta': -0.012176},
+_FILTER_DELTAS: Dict[str, Dict[str, float]] = {
+    'Sloan_r': {'delta':  0.00, 'beta': 0.10},  # reference band
+    'Sloan_g': {'delta': +0.11, 'beta': 0.15},
+    'Sloan_i': {'delta': -0.73, 'beta': 0.07},
+    'Sloan_z': {'delta': -1.78, 'beta': 0.04},  # no SBT data; estimated from D50 ratio
+    'N':       {'delta': +0.28, 'beta': 0.08},  # clear / open filter
 }
 
-# Valid zp_norm ranges per filter (from zpfit.py SANITY_LIMITS).
-# Observations outside [zp_min, zp_max] are discarded before fitting.
-SANITY_LIMITS: Dict[str, Dict[str, float]] = {
-    'Sloan_g': {'zp_min': 16.7, 'zp_max': 22.1},
-    'Sloan_r': {'zp_min': 16.8, 'zp_max': 22.0},
-    'Sloan_i': {'zp_min': 16.3, 'zp_max': 21.5},
-    'Sloan_z': {'zp_min': 15.5, 'zp_max': 20.7},
-    'N':       {'zp_min': 18.0, 'zp_max': 23.2},
-}
+_DEFAULT_ZP_R = 18.28  # SBT typical; used when no config is available
+
+
+def filter_params_for(zp_r: float) -> Dict[str, Dict[str, float]]:
+    """Return {filter: {Z0, beta}} with Z0 = zp_r + delta."""
+    return {
+        filt: {'Z0': zp_r + fp['delta'], 'beta': fp['beta']}
+        for filt, fp in _FILTER_DELTAS.items()
+    }
+
+
+def sanity_limits_for(zp_r: float,
+                      margin_low: float = 5.0,
+                      margin_high: float = 1.0) -> Dict[str, Dict[str, float]]:
+    """Return per-filter {zp_min, zp_max} derived from zp_r.
+
+    zp_min = zp_r + delta - margin_low   (very bad night or heavy cloud)
+    zp_max = zp_r + delta + margin_high  (noise headroom above airmass-0 value)
+    """
+    return {
+        filt: {
+            'zp_min': zp_r + fp['delta'] - margin_low,
+            'zp_max': zp_r + fp['delta'] + margin_high,
+        }
+        for filt, fp in _FILTER_DELTAS.items()
+    }
+
+
+# Module-level defaults — use _DEFAULT_ZP_R so existing code that imports
+# FILTER_PARAMS / SANITY_LIMITS directly still works (e.g. unit tests, zpfit).
+FILTER_PARAMS: Dict[str, Dict[str, float]] = filter_params_for(_DEFAULT_ZP_R)
+SANITY_LIMITS: Dict[str, Dict[str, float]] = sanity_limits_for(_DEFAULT_ZP_R)
 
 # Default weighting parameters (can be overridden per call)
 DEFAULT_SAME_FILTER_WEIGHT = 2.0   # multiplier for same-filter observations
