@@ -475,7 +475,7 @@ class PhotometryPipeline:
         if self.stat_dir is None:
             return
         try:
-            from rtspy.observe.stat import record_from_ecsv, write_stat_record
+            from asarina.observe.stat import record_from_ecsv, write_stat_record
             record = record_from_ecsv(ecsv_path)
             if record is not None:
                 write_stat_record(record, stat_dir=str(self.stat_dir))

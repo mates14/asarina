@@ -62,6 +62,9 @@ dmypy.json
 *.swo
 *~
 
+# Trained ML models — numpy-version-specific pickle, rebuild per machine
+asarina/observe/bgnoise_model.pkl
+
 # Project-specific
 *.fits
 *.ecsv

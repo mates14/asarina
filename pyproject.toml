@@ -10,19 +10,30 @@ dependencies = [
     "numpy>=1.20",
     "astropy>=5.0",
     "scipy>=1.7",
+    "pandas>=1.5",
+    "scikit-learn>=1.3",
+    "joblib>=1.2",
+    "matplotlib>=3.5",
+    "pyyaml>=6.0",
     # pyrt must be installed separately
 ]
 
 [project.scripts]
-asarina-make-calib    = "asarina.calib.make_calib:main"
-asarina-image         = "asarina.pipeline.image:main"
-asarina-watch         = "asarina.pipeline.watch:main"
-asarina-imgproc       = "asarina.pipeline.imgproc:main"
-asarina-patch-window  = "asarina.pipeline.patch_window:main"
+asarina-make-calib            = "asarina.calib.make_calib:main"
+asarina-image                 = "asarina.pipeline.image:main"
+asarina-watch                 = "asarina.pipeline.watch:main"
+asarina-imgproc               = "asarina.pipeline.imgproc:main"
+asarina-patch-window          = "asarina.pipeline.patch_window:main"
+asarina-observe-train         = "asarina.observe.train:main"
+asarina-observe-zpfit         = "asarina.observe.zpfit:main"
+asarina-observe-apecalfit     = "asarina.observe.apecalfit:main"
+asarina-observe-stat-ingest   = "asarina.observe.stat:main"
+asarina-observe-nightplot     = "asarina.observe.nightplot:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["asarina*"]
 
 [tool.setuptools.package-data]
-"asarina.calib" = ["*.sh"]
+"asarina.calib"   = ["*.sh"]
+"asarina.observe" = ["bgnoise_model.pkl"]
