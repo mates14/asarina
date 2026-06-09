@@ -484,13 +484,21 @@ def main():
         calibrated = temp_dir / fits_file
 
         # 2. Web preview — runs in parallel with solve, does not delay corrwerr
+        web_thread: Optional[threading.Thread] = None
         if args.realtime:
-            threading.Thread(
+            web_thread = threading.Thread(
                 target=_make_web_image, args=(calibrated, ccd_name), daemon=True,
-            ).start()
+            )
+            web_thread.start()
 
         # 3. Source detection + solve + initial photometry
         if not pipeline.solve(fits_file, temp_dir):
+            # Join before exit: ensures the preview completes and releases its
+            # lock file while temp_dir is still alive (calibrated file exists).
+            # Without this, a daemon thread killed by sys.exit leaves a stale
+            # lock, causing the next image's preview to be skipped too.
+            if web_thread is not None:
+                web_thread.join(timeout=30)
             sys.exit(1)
 
         # 3.5. Report FWHM from phcat catalog to RTS2 (real-time only)
