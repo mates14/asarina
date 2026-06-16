@@ -28,6 +28,7 @@ import subprocess
 import tempfile
 import shutil
 import random
+import re
 import sqlite3
 import hashlib
 import struct
@@ -46,6 +47,20 @@ except ImportError:
     sys.exit(1)
 
 from asarina.chip_id import get_camera_id
+
+
+def image_hdu(hdul):
+    """Return the HDU that actually holds image data and keywords.
+
+    Rice/tile-compressed FITS (the ``.fitz`` files in older archives) keep an
+    empty PrimaryHDU at index 0 and store the image plus its header keywords
+    (CCD_SER, IMAGETYP, ...) in a CompImageHDU at index 1. Plain ``.fits`` files
+    carry everything in the PrimaryHDU. This picks the right one transparently.
+    """
+    hdu = hdul[0]
+    if hdu.data is None and len(hdul) > 1:
+        hdu = hdul[1]
+    return hdu
 
 
 def ccd_ser_to_camera_id(ccd_ser: str) -> str:
@@ -595,37 +610,141 @@ def discover_years(archive_base: str) -> list:
     return years
 
 
-def discover_cameras(archive_base: str, year: str) -> list:
-    """Discover available cameras for a given year."""
-    cameras = set()
-    year_path = Path(archive_base) / year
+# Directory-name conventions for calibration frames. Camera-level directory
+# names are NOT in here on purpose: they are arbitrary (C0/C1 on D50, NF/WF on
+# FRAM, andor/alta on BOOTES-1, absent on single-camera archives like BOOTES-2),
+# so layout is detected by content, never by matching camera names.
+TARGET_ID_RE = re.compile(r"^\d{5}$")          # RTS2 target id, e.g. 00001
+CALIB_DIR_NAMES = {                            # accepted calib dir spellings
+    "dark": ("dark", "darks"),
+    "flat": ("flat", "flats"),
+}
+CALIB_TARGET_IDS = {                           # RTS2 convention: tgt 1=dark, 2=flat
+    "dark": "00001",
+    "flat": "00002",
+}
+_NIGHT_CONTENT_DIRS = {"dark", "darks", "flat", "flats"}
 
+
+def _is_night_contents(d: Path) -> bool:
+    """True if *d* directly holds a night's observations.
+
+    A night-contents directory contains RTS2 target-id subdirs (5 digits) and/or
+    calibration subdirs (dark/darks/flat/flats). This is the marker we use to
+    locate the right depth without trusting any camera directory name.
+    """
+    try:
+        for child in d.iterdir():
+            if child.is_dir() and (TARGET_ID_RE.match(child.name)
+                                   or child.name in _NIGHT_CONTENT_DIRS):
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def detect_layout(archive_base: str, year: str, sample: int = 30) -> str:
+    """Detect archive layout for a year: 'single' or 'multi' camera.
+
+    'single' = calibration sits directly under the night ({year}/{night}/dark/).
+    'multi'  = a camera directory (any name) sits between night and calib
+               ({year}/{night}/<camera>/dark/).
+    Decided by inspecting directory *content*, not names.
+    """
+    year_path = Path(archive_base) / year
+    if not year_path.exists():
+        return "single"
+
+    single = multi = 0
+    for night in sorted(p for p in year_path.iterdir() if p.is_dir()):
+        if _is_night_contents(night):
+            single += 1
+        else:
+            try:
+                if any(_is_night_contents(c) for c in night.iterdir() if c.is_dir()):
+                    multi += 1
+            except OSError:
+                pass
+        if single + multi >= sample:
+            break
+
+    return "multi" if multi > single else "single"
+
+
+def discover_cameras(archive_base: str, year: str, layout: str = "auto") -> list:
+    """Discover available cameras for a given year.
+
+    Multi-camera layout: returns the camera directory names (whatever they are).
+    Single-camera layout: there is no camera directory, so identify the
+    camera(s) from FITS headers of a few calibration frames (e.g. 'andor3567').
+    """
+    if layout == "auto":
+        layout = detect_layout(archive_base, year)
+
+    year_path = Path(archive_base) / year
     if not year_path.exists():
         return []
 
-    # Look for camera directories in the structure
-    for night_dir in year_path.iterdir():
-        if night_dir.is_dir():
-            for cam_dir in night_dir.iterdir():
-                if cam_dir.is_dir() and cam_dir.name.startswith("C"):
-                    cameras.add(cam_dir.name)
+    if layout == "multi":
+        cameras = set()
+        for night in year_path.iterdir():
+            if not night.is_dir() or _is_night_contents(night):
+                continue
+            try:
+                for cam in night.iterdir():
+                    if cam.is_dir() and _is_night_contents(cam):
+                        cameras.add(cam.name)
+            except OSError:
+                pass
+        return sorted(cameras)
 
-    return sorted(cameras)
+    # single-camera: identify by header from a sample of calib frames
+    sample = (find_calibration_files(archive_base, year, None, "dark", layout="single")
+              or find_calibration_files(archive_base, year, None, "flat", layout="single"))
+    camera_ids = set()
+    for f in sample[:25]:
+        try:
+            with fits.open(f) as hdul:
+                cid = get_camera_id(image_hdu(hdul).header)
+                if cid and cid != "unknown":
+                    camera_ids.add(cid)
+        except Exception:
+            continue
+    return sorted(camera_ids)
 
 
-def find_calibration_files(archive_base: str, year: str, camera: str, file_type: str) -> list:
-    """Find all calibration files (darks or flats) for a given year and camera.
+def find_calibration_files(archive_base: str, year: str, camera: str,
+                           file_type: str, layout: str = "auto") -> list:
+    """Find all calibration files (darks or flats) for a given year.
 
-    If camera is None, finds files across ALL cameras (C0, C1, C2, etc.)
+    Handles both the multi-camera layout ({year}/{night}/<camera>/dark[s]/) and
+    the single-camera layout ({year}/{night}/dark[s]/), accepts both 'dark' and
+    'darks' spellings, the RTS2 target-id convention (00001=dark, 00002=flat),
+    and both '.fits' and Rice-compressed '.fitz' extensions. The path is only a
+    hint for where to look; IMAGETYP from the header is the final arbiter
+    (compute_stats_parallel filters on it).
     """
     import glob
 
-    if camera is None:
-        # Find across all cameras
-        pattern = f"{archive_base}/{year}/*/C*/{file_type}s/20*.fits"
+    if layout == "auto":
+        layout = detect_layout(archive_base, year)
+
+    calib_dirs = CALIB_DIR_NAMES[file_type]
+    target_id = CALIB_TARGET_IDS[file_type]
+    exts = ("fits", "fitz")
+    calib_subdirs = list(calib_dirs) + [target_id]
+
+    if layout == "multi":
+        cam = camera if camera else "*"
+        prefixes = [f"{archive_base}/{year}/*/{cam}"]
     else:
-        pattern = f"{archive_base}/{year}/*/{camera}/{file_type}s/20*.fits"
-    files = glob.glob(pattern)
+        prefixes = [f"{archive_base}/{year}/*"]
+
+    files = set()
+    for prefix in prefixes:
+        for sub in calib_subdirs:
+            for ext in exts:
+                files.update(glob.glob(f"{prefix}/{sub}/20*.{ext}"))
 
     return sorted(files)
 
@@ -634,8 +753,9 @@ def compute_image_stats(fits_path: str) -> dict:
     """Compute statistics for a FITS image (equivalent to do_sigma.py)."""
     try:
         with fits.open(fits_path) as hdul:
-            data = hdul[0].data.astype(np.float32)
-            header = hdul[0].header
+            hdu = image_hdu(hdul)
+            data = hdu.data.astype(np.float32)
+            header = hdu.header
 
             # Compute row-by-row differences for noise estimation
             scale_factor = 1.0489  # median to sigma conversion
@@ -886,8 +1006,8 @@ def validate_dark_pair(file1: str, file2: str, expected_sigma: float, tolerance:
     """
     try:
         with fits.open(file1) as h1, fits.open(file2) as h2:
-            data1 = h1[0].data.astype(np.float32)
-            data2 = h2[0].data.astype(np.float32)
+            data1 = image_hdu(h1).data.astype(np.float32)
+            data2 = image_hdu(h2).data.astype(np.float32)
 
             diff = data1 - data2
             row_stds = np.array([np.std(row) for row in diff])
@@ -1282,9 +1402,10 @@ def subtract_dark(flat_file: str, dark_file: str, output_file: str) -> bool:
     """Subtract dark from flat (normalization is done by mixflat.sh)."""
     try:
         with fits.open(flat_file) as flat_hdu, fits.open(dark_file) as dark_hdu:
-            flat_data = flat_hdu[0].data.astype(np.float32)
-            dark_data = dark_hdu[0].data.astype(np.float32)
-            header = flat_hdu[0].header.copy()
+            flat_image = image_hdu(flat_hdu)
+            flat_data = flat_image.data.astype(np.float32)
+            dark_data = image_hdu(dark_hdu).data.astype(np.float32)
+            header = flat_image.header.copy()
 
             # Subtract dark only - mixflat.sh handles normalization
             corrected = flat_data - dark_data
@@ -1437,7 +1558,8 @@ def filter_flats_generic(stats_list: list, config: CalibConfig) -> list:
 def process_calibrations(config: CalibConfig, year: str, camera: Optional[str] = None,
                          output_base: Optional[str] = None, validate_darks: bool = True,
                          dry_run: bool = False, skip_flats: bool = False,
-                         n_workers: int = None, stats_only: bool = False):
+                         n_workers: int = None, stats_only: bool = False,
+                         layout: str = "auto"):
     """Process calibration frames.
 
     Find ALL files in archive, group by physical camera_id,
@@ -1445,6 +1567,10 @@ def process_calibrations(config: CalibConfig, year: str, camera: Optional[str] =
     """
 
     log(f"Processing calibrations for {year} from {config.archive_base}", "info")
+
+    if layout == "auto":
+        layout = detect_layout(config.archive_base, year)
+    log(f"Archive layout: {layout}-camera", "info")
 
     # Show cache info
     cache = get_stats_cache()
@@ -1459,7 +1585,7 @@ def process_calibrations(config: CalibConfig, year: str, camera: Optional[str] =
 
     # --- FIND ALL DARK FILES ---
     log(f"\nFinding dark frames across all archive cameras...", "info")
-    dark_files = find_calibration_files(config.archive_base, year, camera, "dark")
+    dark_files = find_calibration_files(config.archive_base, year, camera, "dark", layout=layout)
     log(f"Found {len(dark_files)} dark files", "info")
 
     all_dark_stats = []
@@ -1473,7 +1599,7 @@ def process_calibrations(config: CalibConfig, year: str, camera: Optional[str] =
     all_flat_stats = []
     if not skip_flats:
         log(f"\nFinding flat frames across all archive cameras...", "info")
-        flat_files = find_calibration_files(config.archive_base, year, camera, "flat")
+        flat_files = find_calibration_files(config.archive_base, year, camera, "flat", layout=layout)
         log(f"Found {len(flat_files)} flat files", "info")
 
         if flat_files:
@@ -1596,6 +1722,10 @@ Examples:
                         help="List available cameras for the specified year and exit")
     parser.add_argument("--archive", "-a", type=str,
                         help="Archive base path (default: /archive)")
+    parser.add_argument("--layout", type=str, default="auto",
+                        choices=["auto", "single", "multi"],
+                        help="Archive layout: 'multi' has a camera dir between "
+                             "night and calib, 'single' does not. Default: auto-detect.")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Show detailed debug output")
     parser.add_argument("--workers", "-j", type=int, default=None,
@@ -1634,7 +1764,7 @@ Examples:
         if not args.year:
             print("Error: --year is required with --list-cameras")
             sys.exit(1)
-        cameras = discover_cameras(config.archive_base, args.year)
+        cameras = discover_cameras(config.archive_base, args.year, layout=args.layout)
         if cameras:
             print(f"Available cameras in {args.year}:")
             for c in cameras:
@@ -1676,6 +1806,7 @@ Examples:
         skip_flats=args.skip_flats,
         n_workers=args.workers,
         stats_only=args.stats_only,
+        layout=args.layout,
     )
 
     log("\nDone!", "info")
