@@ -40,22 +40,22 @@ trap "rm -rf $tempdir" EXIT
 
 # Stage inputs into the temp dir as plain single-HDU FITS. Archive frames may be
 # Rice tile-compressed (.fitz: empty primary HDU + image in extension 1), which
-# IRAF cannot read - flatten the image into the primary HDU with astropy. Plain
-# .fits pass through the same path. Sequential names also avoid collisions
-# between identically-named frames from different nights.
-python3 - "$tempdir" "$@" <<'PYEOF'
-import sys
-from astropy.io import fits
-tempdir, files = sys.argv[1], sys.argv[2:]
-with open(f"{tempdir}/files.lst", "w") as lst:
-    for i, f in enumerate(files):
-        out = f"in_{i:05d}.fits"
-        with fits.open(f) as h:
-            hdu = h[0] if h[0].data is not None else h[1]
-            fits.PrimaryHDU(data=hdu.data, header=hdu.header).writeto(
-                f"{tempdir}/{out}", overwrite=True)
-        lst.write(out + "\n")
-PYEOF
+# IRAF cannot read. cfitsio's imcopy selects the image HDU and writes it as the
+# output primary; a primary HDU cannot be tile-compressed, so this decompresses.
+# .fitz keep the image in extension [1], plain .fits in the primary [0].
+# Sequential names avoid collisions between same-named frames from other nights.
+> "$tempdir/files.lst"
+i=0
+for f in "$@"; do
+    out=$(printf "in_%05d.fits" "$i")
+    case "$f" in
+        *.fitz) sec="[1]" ;;
+        *)      sec="[0]" ;;
+    esac
+    imcopy "$f$sec" "$tempdir/$out"
+    echo "$out" >> "$tempdir/files.lst"
+    i=$((i+1))
+done
 cd "$tempdir"
 
 # Isolate IRAF state to avoid conflicts when running in parallel
