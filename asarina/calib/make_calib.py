@@ -484,6 +484,15 @@ CAMERA_NOISE_MODELS = {
         "1x1": lambda exp, temp: (math.sqrt(8.09**2 + 0.052 * exp), 0.10),
         "2x2": lambda exp, temp: (8.36174, 0.16),
     },
+    # BOOTES-2 / COLORES Andor iXon, serial 3567
+    "andor3567": {
+        # Pair-difference sigma measured flat at ~3.0 ADU across 1-300 s at
+        # -58.5 C (read-noise dominated, negligible dark current). Wide-ish
+        # tolerance covers the observed 1.9-3.65 spread; refine from
+        # noise-andor3567.out once a validated run accumulates data.
+        "1x1": lambda exp, temp: (3.0, 0.5),
+        "2x2": lambda exp, temp: (3.0, 0.5),  # TODO: verify if 2x2 darks appear
+    },
     "fli534": {  # FLI IMG4710 EEV CCD47-10, serial suffix 258.534
         # sigma = sqrt(5.72² + 0.0595 * exptime), from fit to noise-fli534.out
         "1x1": lambda exp, temp: (math.sqrt(5.72**2 + 0.0595 * exp), 0.10),
@@ -541,12 +550,21 @@ class CalibConfig:
     flat_filter: dict = field(default_factory=dict)
     # Number of parallel workers
     parallel_workers: int = MAX_WORKERS
+    # Max allowed |CCD_TEMP - CCD_SET| (deg C) for a frame to count as
+    # temperature-stabilized. TEC cameras near their cooling floor sit a
+    # couple degrees off setpoint at steady state (e.g. BOOTES-2 iXon stabilizes
+    # at -58.5 vs a -60 setpoint), so 1.0 was too tight; 2.5 still rejects
+    # genuinely warm/uncooled frames (which are tens of degrees off).
+    temp_tolerance: float = 2.5
 
 
 # Camera-specific filter settings (keyed by camera_id from registry)
 CAMERA_FILTERS = {
     "dark": {
         "andor46": {"max_sigma": 15, "min_median": None, "max_median": 1300},
+        # BOOTES-2 iXon: good darks ~99 ADU median, sigma ~2.1; warm/saturated
+        # junk reaches median 32767 / sigma 216 - cut those out.
+        "andor3567": {"max_sigma": 10, "min_median": None, "max_median": 1000},
         "fli534": {"max_sigma": 15, "min_median": None, "max_median": None},
         "fli785": {"max_sigma": 15, "min_median": None, "max_median": None},
         "mi6166": {"max_sigma": 15, "min_median": None, "max_median": None},
@@ -556,6 +574,7 @@ CAMERA_FILTERS = {
     },
     "flat": {
         "andor46": {"min_median": 10000, "max_median": 50000},
+        "andor3567": {"min_median": 5000, "max_median": 50000},
         "fli534": {"min_median": 5000, "max_median": 50000},
         "fli785": {"min_median": 5000, "max_median": 50000},
         "mi6166": {"min_median": 5000, "max_median": 50000},
@@ -903,10 +922,10 @@ def filter_darks(stats_list: list, config: CalibConfig, camera: str) -> list:
         if s is None:
             continue
 
-        # Check temperature stabilization (allow ±1°C tolerance)
+        # Check temperature stabilization (configurable tolerance)
         if s['ccd_temp'] is not None and s['ccd_set'] is not None:
             temp_diff = abs(s['ccd_temp'] - s['ccd_set'])
-            if temp_diff > 1.0:
+            if temp_diff > config.temp_tolerance:
                 log(f"Skipping {s['file']} - temperature not stabilized ({s['ccd_temp']:.1f} vs {s['ccd_set']:.1f})", "debug")
                 continue
 
@@ -1014,9 +1033,12 @@ def validate_dark_pair(file1: str, file2: str, expected_sigma: float, tolerance:
             measured_sigma = np.median(row_stds)
 
             # Check if measured sigma is within expected range
-            # Lower bound: reject near-zero (saturated/dead images)
+            # Lower bound: reject near-zero (saturated/dead images). Floor is
+            # model-relative (half the expected sigma), not a fixed constant:
+            # low-noise cameras like the BOOTES-2 iXon have real darks at ~1.9
+            # ADU, which a hardcoded 2.7 floor would wrongly reject.
             # Upper bound: reject images with light leaks / bad reset
-            lower = max(expected_sigma - 10 * tolerance, 2.7)  # ~8/3 minimum for any CCD
+            lower = max(expected_sigma - 10 * tolerance, 0.5 * expected_sigma)
             upper = expected_sigma + 2 * tolerance
 
             is_valid = lower < measured_sigma < upper
@@ -1493,11 +1515,37 @@ def group_by_camera_id(stats_list: list) -> dict:
 
 
 def filter_darks_generic(stats_list: list, config: CalibConfig) -> list:
-    """Filter dark frames using camera_id-specific criteria."""
+    """Filter dark frames using camera_id-specific criteria.
+
+    Logs the input value distribution and a per-reason breakdown of rejections,
+    so the filter/noise model for a new camera can be tuned from real numbers
+    instead of guesswork.
+    """
     # Permissive defaults for unknown cameras - let validation catch bad frames
     default_filter = {"max_sigma": 50, "min_median": None, "max_median": None}
 
+    # Per-reason rejection counters for diagnostics
+    drop = defaultdict(int)
     filtered = []
+
+    # Report the input distribution up front (per camera_id), so an operator can
+    # see where to put thresholds without querying the stats cache by hand.
+    valid = [s for s in stats_list
+             if s and s.get('sigma') is not None and s.get('median') is not None]
+    for cam in sorted(set(s.get('camera_id', 'unknown') for s in valid)):
+        cv = [s for s in valid if s.get('camera_id', 'unknown') == cam]
+        def pct(key, q):
+            xs = sorted(s[key] for s in cv if s.get(key) is not None)
+            return xs[min(len(xs) - 1, int(q * len(xs)))] if xs else float('nan')
+        td = [abs(s['ccd_temp'] - s['ccd_set']) for s in cv
+              if s.get('ccd_temp') is not None and s.get('ccd_set') is not None]
+        td_med = sorted(td)[len(td) // 2] if td else float('nan')
+        log(f"  {cam}: n={len(cv)} "
+            f"median[p10/50/90]={pct('median',.1):.0f}/{pct('median',.5):.0f}/{pct('median',.9):.0f} "
+            f"sigma[p10/50/90]={pct('sigma',.1):.2f}/{pct('sigma',.5):.2f}/{pct('sigma',.9):.2f} "
+            f"|temp-set|[med]={td_med:.2f} (tol={config.temp_tolerance})", "info")
+        log(f"  {cam}: dark filter = {config.dark_filter.get(cam, default_filter)}", "info")
+
     for s in stats_list:
         if s is None:
             continue
@@ -1506,25 +1554,33 @@ def filter_darks_generic(stats_list: list, config: CalibConfig) -> list:
         camera_id = s.get('camera_id', 'unknown')
         filt = config.dark_filter.get(camera_id, default_filter)
 
-        # Check temperature stabilization
+        # Check temperature stabilization (configurable tolerance)
         if s['ccd_temp'] is not None and s['ccd_set'] is not None:
-            temp_diff = abs(s['ccd_temp'] - s['ccd_set'])
-            if temp_diff > 1.0:
+            if abs(s['ccd_temp'] - s['ccd_set']) > config.temp_tolerance:
+                drop['temp_unstable'] += 1
                 continue
 
         if s['sigma'] is None or s['median'] is None or s['average'] is None:
+            drop['missing_stats'] += 1
             continue
 
         if 'max_sigma' in filt and s['sigma'] > filt['max_sigma']:
+            drop['sigma_high'] += 1
             continue
         if 'min_median' in filt and filt['min_median'] is not None:
             if s['median'] < filt['min_median']:
+                drop['median_low'] += 1
                 continue
         if 'max_median' in filt and filt['max_median'] is not None:
             if s['median'] > filt['max_median']:
+                drop['median_high'] += 1
                 continue
 
         filtered.append(s)
+
+    if drop:
+        breakdown = ", ".join(f"{k}={v}" for k, v in sorted(drop.items()))
+        log(f"  Dark rejections: {breakdown}", "info")
 
     return filtered
 
