@@ -574,7 +574,10 @@ CAMERA_FILTERS = {
     },
     "flat": {
         "andor46": {"min_median": 10000, "max_median": 50000},
-        "andor3567": {"min_median": 5000, "max_median": 50000},
+        # BOOTES-2 twilight flats sit at ~2500 ADU (much fainter than D50);
+        # min 5000 dropped essentially all of them. Reject only too-faint and
+        # saturated (~32767) frames.
+        "andor3567": {"min_median": 1500, "max_median": 30000},
         "fli534": {"min_median": 5000, "max_median": 50000},
         "fli785": {"min_median": 5000, "max_median": 50000},
         "mi6166": {"min_median": 5000, "max_median": 50000},
@@ -1385,16 +1388,22 @@ def create_master_darks(dark_groups: dict, output_dir: Path, validate: bool = Tr
 
 
 def find_matching_dark(flat_stats: dict, master_darks: dict) -> Optional[str]:
-    """Find the best matching master dark for a flat frame."""
+    """Find the best matching master dark for a flat frame.
+
+    Temperature is binned to nearest 5 deg C to match group_darks(), then darks
+    are matched by *nearest* temperature (within a tolerance) rather than exact
+    equality, so a flat at -58.5 pairs with a -60 master dark. Among candidates
+    the nearest temperature wins, then the nearest exposure time.
+    """
     flat_temp = flat_stats['ccd_temp']
     if flat_temp is not None:
-        flat_temp = 2 * int(flat_temp / 2 + 0.5) if flat_temp > 0 else 2 * int(flat_temp / 2 - 0.5)
+        flat_temp = 5 * round(flat_temp / 5)  # same binning as group_darks()
     flat_exptime = flat_stats['exptime']
     flat_binning = flat_stats['binning']
     flat_size = (flat_stats.get('naxis1', 0), flat_stats.get('naxis2', 0))
 
     best_match = None
-    best_dist = float('inf')
+    best_dist = None
 
     for key, dark_path in master_darks.items():
         # Unpack key - may be (temp, exp, bin) or (temp, exp, bin, size)
@@ -1406,14 +1415,20 @@ def find_matching_dark(flat_stats: dict, master_darks: dict) -> Optional[str]:
 
         if binning != flat_binning:
             continue
-        if temp != flat_temp:
-            continue
         # Must match frame size
         if size is not None and size != flat_size:
             continue
 
-        dist = abs(exptime - flat_exptime)
-        if dist < best_dist:
+        if temp is None or flat_temp is None:
+            temp_dist = 0.0
+        else:
+            temp_dist = abs(temp - flat_temp)
+            if temp_dist > 5:  # don't pair across very different temperatures
+                continue
+
+        # Prefer nearest temperature, then nearest exposure time
+        dist = (temp_dist, abs(exptime - flat_exptime))
+        if best_dist is None or dist < best_dist:
             best_dist = dist
             best_match = dark_path
 
@@ -1586,11 +1601,27 @@ def filter_darks_generic(stats_list: list, config: CalibConfig) -> list:
 
 
 def filter_flats_generic(stats_list: list, config: CalibConfig) -> list:
-    """Filter flat frames using camera_id-specific criteria."""
+    """Filter flat frames using camera_id-specific criteria.
+
+    Like filter_darks_generic, logs the per-camera median distribution and a
+    per-reason rejection breakdown so flat thresholds can be set from real data.
+    """
     # Permissive defaults for unknown cameras
     default_filter = {"min_median": 5000, "max_median": 50000}
 
+    drop = defaultdict(int)
     filtered = []
+
+    valid = [s for s in stats_list if s and s.get('median') is not None]
+    for cam in sorted(set(s.get('camera_id', 'unknown') for s in valid)):
+        cv = [s for s in valid if s.get('camera_id', 'unknown') == cam]
+        def pct(key, q):
+            xs = sorted(s[key] for s in cv if s.get(key) is not None)
+            return xs[min(len(xs) - 1, int(q * len(xs)))] if xs else float('nan')
+        log(f"  {cam}: n={len(cv)} "
+            f"median[p10/50/90]={pct('median',.1):.0f}/{pct('median',.5):.0f}/{pct('median',.9):.0f} "
+            f"flat filter = {config.flat_filter.get(cam, default_filter)}", "info")
+
     for s in stats_list:
         if s is None:
             continue
@@ -1600,13 +1631,20 @@ def filter_flats_generic(stats_list: list, config: CalibConfig) -> list:
         filt = config.flat_filter.get(camera_id, default_filter)
 
         if 'min_sigma' in filt and s['sigma'] < filt['min_sigma']:
+            drop['sigma_low'] += 1
             continue
         if 'min_median' in filt and s['median'] < filt['min_median']:
+            drop['median_low'] += 1
             continue
         if 'max_median' in filt and s['median'] > filt['max_median']:
+            drop['median_high'] += 1
             continue
 
         filtered.append(s)
+
+    if drop:
+        breakdown = ", ".join(f"{k}={v}" for k, v in sorted(drop.items()))
+        log(f"  Flat rejections: {breakdown}", "info")
 
     return filtered
 
