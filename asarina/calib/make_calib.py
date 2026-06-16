@@ -574,10 +574,11 @@ CAMERA_FILTERS = {
     },
     "flat": {
         "andor46": {"min_median": 10000, "max_median": 50000},
-        # BOOTES-2 twilight flats sit at ~2500 ADU (much fainter than D50);
-        # min 5000 dropped essentially all of them. Reject only too-faint and
-        # saturated (~32767) frames.
-        "andor3567": {"min_median": 1500, "max_median": 30000},
+        # BOOTES-2 twilight flats are targeted to ~2000 ADU (kept low because
+        # too much signal across the CCD caused charge lag/smearing in this
+        # readout mode). Above ~10000 ADU the response is non-linear and the
+        # flat is useless, so cap there; min 5000 (D50-level) dropped them all.
+        "andor3567": {"min_median": 1500, "max_median": 10000},
         "fli534": {"min_median": 5000, "max_median": 50000},
         "fli785": {"min_median": 5000, "max_median": 50000},
         "mi6166": {"min_median": 5000, "max_median": 50000},
@@ -1569,6 +1570,11 @@ def filter_darks_generic(stats_list: list, config: CalibConfig) -> list:
         camera_id = s.get('camera_id', 'unknown')
         filt = config.dark_filter.get(camera_id, default_filter)
 
+        # Any frame at or above 0 C is uncooled and never valid for calibration
+        if s['ccd_temp'] is not None and s['ccd_temp'] > 0:
+            drop['temp_above_zero'] += 1
+            continue
+
         # Check temperature stabilization (configurable tolerance)
         if s['ccd_temp'] is not None and s['ccd_set'] is not None:
             if abs(s['ccd_temp'] - s['ccd_set']) > config.temp_tolerance:
@@ -1633,6 +1639,11 @@ def filter_flats_generic(stats_list: list, config: CalibConfig) -> list:
         # Get filter for this camera_id, fall back to default
         camera_id = s.get('camera_id', 'unknown')
         filt = config.flat_filter.get(camera_id, default_filter)
+
+        # Any frame at or above 0 C is uncooled and never valid for calibration
+        if s['ccd_temp'] is not None and s['ccd_temp'] > 0:
+            drop['temp_above_zero'] += 1
+            continue
 
         # Reject flats taken before the camera was temperature-stabilized
         # (same check as darks): a warm flat has no usable dark and is not
