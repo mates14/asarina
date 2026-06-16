@@ -562,9 +562,15 @@ class CalibConfig:
 CAMERA_FILTERS = {
     "dark": {
         "andor46": {"max_sigma": 15, "min_median": None, "max_median": 1300},
-        # BOOTES-2 iXon: good darks ~99 ADU median, sigma ~2.1; warm/saturated
-        # junk reaches median 32767 / sigma 216 - cut those out.
-        "andor3567": {"max_sigma": 10, "min_median": None, "max_median": 1000},
+        # BOOTES-2 iXon: read noise ~2.24 ADU, so clean darks sit tightly at
+        # sigma ~2.1 and mean==median (ma_diff ~0), regardless of the bias level
+        # (the Andor baseclamp drifted between ~100/350/400 and is NOT in the
+        # headers, so absolute median is unreliable). Exposed/illuminated frames
+        # mixed in with the darks instead show up bias-independently as elevated
+        # sigma (shot noise) and/or positive mean-median skew - cut on those.
+        # max_median only guards against saturation (~32767).
+        "andor3567": {"max_sigma": 4, "max_ma_diff": 1.0,
+                      "min_median": None, "max_median": 1000},
         "fli534": {"max_sigma": 15, "min_median": None, "max_median": None},
         "fli785": {"max_sigma": 15, "min_median": None, "max_median": None},
         "mi6166": {"max_sigma": 15, "min_median": None, "max_median": None},
@@ -1558,7 +1564,8 @@ def filter_darks_generic(stats_list: list, config: CalibConfig) -> list:
         td_med = sorted(td)[len(td) // 2] if td else float('nan')
         log(f"  {cam}: n={len(cv)} "
             f"median[p10/50/90]={pct('median',.1):.0f}/{pct('median',.5):.0f}/{pct('median',.9):.0f} "
-            f"sigma[p10/50/90]={pct('sigma',.1):.2f}/{pct('sigma',.5):.2f}/{pct('sigma',.9):.2f} "
+            f"sigma[p50/90/99]={pct('sigma',.5):.2f}/{pct('sigma',.9):.2f}/{pct('sigma',.99):.2f} "
+            f"skew[p50/90/99]={pct('ma_diff',.5):.2f}/{pct('ma_diff',.9):.2f}/{pct('ma_diff',.99):.2f} "
             f"|temp-set|[med]={td_med:.2f} (tol={config.temp_tolerance})", "info")
         log(f"  {cam}: dark filter = {config.dark_filter.get(cam, default_filter)}", "info")
 
@@ -1588,6 +1595,12 @@ def filter_darks_generic(stats_list: list, config: CalibConfig) -> list:
         if 'max_sigma' in filt and s['sigma'] > filt['max_sigma']:
             drop['sigma_high'] += 1
             continue
+        # Mean-median skew flags exposed/illuminated frames (sources pull the
+        # mean above the median) independently of the unknown bias level.
+        if filt.get('max_ma_diff') is not None and s.get('ma_diff') is not None:
+            if s['ma_diff'] > filt['max_ma_diff']:
+                drop['skew_high'] += 1
+                continue
         if 'min_median' in filt and filt['min_median'] is not None:
             if s['median'] < filt['min_median']:
                 drop['median_low'] += 1
