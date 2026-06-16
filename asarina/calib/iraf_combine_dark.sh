@@ -38,8 +38,24 @@ mkdir -p "$user_tmp"
 tempdir=$(mktemp -d "$user_tmp/iraf_dark.XXXXXX")
 trap "rm -rf $tempdir" EXIT
 
-# Copy files to temp directory (IRAF workaround)
-cp "$@" "$tempdir/"
+# Stage inputs into the temp dir as plain single-HDU FITS. Archive frames may be
+# Rice tile-compressed (.fitz: empty primary HDU + image in extension 1), which
+# IRAF cannot read - flatten the image into the primary HDU with astropy. Plain
+# .fits pass through the same path. Sequential names also avoid collisions
+# between identically-named frames from different nights.
+python3 - "$tempdir" "$@" <<'PYEOF'
+import sys
+from astropy.io import fits
+tempdir, files = sys.argv[1], sys.argv[2:]
+with open(f"{tempdir}/files.lst", "w") as lst:
+    for i, f in enumerate(files):
+        out = f"in_{i:05d}.fits"
+        with fits.open(f) as h:
+            hdu = h[0] if h[0].data is not None else h[1]
+            fits.PrimaryHDU(data=hdu.data, header=hdu.header).writeto(
+                f"{tempdir}/{out}", overwrite=True)
+        lst.write(out + "\n")
+PYEOF
 cd "$tempdir"
 
 # Isolate IRAF state to avoid conflicts when running in parallel
@@ -55,10 +71,7 @@ else
     exit 1
 fi
 
-# Create file list with basenames
-for f in "$@"; do
-    basename "$f"
-done > files.lst
+# files.lst was written during staging above (in_NNNNN.fits, one per line)
 
 # Calculate rejection parameters
 nrej=$((N / 5))
