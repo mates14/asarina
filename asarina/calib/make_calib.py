@@ -1618,8 +1618,12 @@ def filter_flats_generic(stats_list: list, config: CalibConfig) -> list:
         def pct(key, q):
             xs = sorted(s[key] for s in cv if s.get(key) is not None)
             return xs[min(len(xs) - 1, int(q * len(xs)))] if xs else float('nan')
+        td = [abs(s['ccd_temp'] - s['ccd_set']) for s in cv
+              if s.get('ccd_temp') is not None and s.get('ccd_set') is not None]
+        td_med = sorted(td)[len(td) // 2] if td else float('nan')
         log(f"  {cam}: n={len(cv)} "
             f"median[p10/50/90]={pct('median',.1):.0f}/{pct('median',.5):.0f}/{pct('median',.9):.0f} "
+            f"|temp-set|[med]={td_med:.2f} (tol={config.temp_tolerance}) "
             f"flat filter = {config.flat_filter.get(cam, default_filter)}", "info")
 
     for s in stats_list:
@@ -1629,6 +1633,14 @@ def filter_flats_generic(stats_list: list, config: CalibConfig) -> list:
         # Get filter for this camera_id, fall back to default
         camera_id = s.get('camera_id', 'unknown')
         filt = config.flat_filter.get(camera_id, default_filter)
+
+        # Reject flats taken before the camera was temperature-stabilized
+        # (same check as darks): a warm flat has no usable dark and is not
+        # science-grade. This avoids a flood of later "no matching dark" warnings.
+        if s['ccd_temp'] is not None and s['ccd_set'] is not None:
+            if abs(s['ccd_temp'] - s['ccd_set']) > config.temp_tolerance:
+                drop['temp_unstable'] += 1
+                continue
 
         if 'min_sigma' in filt and s['sigma'] < filt['min_sigma']:
             drop['sigma_low'] += 1
