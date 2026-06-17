@@ -701,37 +701,24 @@ def detect_layout(archive_base: str, year: str, sample: int = 30) -> str:
 
 
 def discover_cameras(archive_base: str, year: str, layout: str = "auto") -> list:
-    """Discover available cameras for a given year.
+    """Discover the physical cameras present in a year, by camera_id.
 
-    Multi-camera layout: returns the camera directory names (whatever they are).
-    Single-camera layout: there is no camera directory, so identify the
-    camera(s) from FITS headers of a few calibration frames (e.g. 'andor3567').
+    Camera identity always comes from the FITS header (e.g. 'andor3567'), never
+    the directory name (which is arbitrary: C0/C1, NF/WF, andor/alta, or absent).
+    These are exactly the values accepted by --camera. Works for both layouts.
     """
     if layout == "auto":
         layout = detect_layout(archive_base, year)
 
-    year_path = Path(archive_base) / year
-    if not year_path.exists():
+    # Sample calibration frames across the whole year (spread, not just the
+    # first night) so every camera in a multi-camera year is represented.
+    files = (find_calibration_files(archive_base, year, "dark", layout=layout)
+             + find_calibration_files(archive_base, year, "flat", layout=layout))
+    if not files:
         return []
-
-    if layout == "multi":
-        cameras = set()
-        for night in year_path.iterdir():
-            if not night.is_dir() or _is_night_contents(night):
-                continue
-            try:
-                for cam in night.iterdir():
-                    if cam.is_dir() and _is_night_contents(cam):
-                        cameras.add(cam.name)
-            except OSError:
-                pass
-        return sorted(cameras)
-
-    # single-camera: identify by header from a sample of calib frames
-    sample = (find_calibration_files(archive_base, year, None, "dark", layout="single")
-              or find_calibration_files(archive_base, year, None, "flat", layout="single"))
+    step = max(1, len(files) // 200)
     camera_ids = set()
-    for f in sample[:25]:
+    for f in files[::step]:
         try:
             with fits.open(f) as hdul:
                 cid = get_camera_id(image_hdu(hdul).header)
@@ -742,10 +729,12 @@ def discover_cameras(archive_base: str, year: str, layout: str = "auto") -> list
     return sorted(camera_ids)
 
 
-def find_calibration_files(archive_base: str, year: str, camera: str,
+def find_calibration_files(archive_base: str, year: str,
                            file_type: str, layout: str = "auto") -> list:
     """Find all calibration files (darks or flats) for a given year.
 
+    Scans every camera (their directory names are arbitrary); selecting a single
+    physical camera is done downstream by camera_id from the header, not here.
     Handles both the multi-camera layout ({year}/{night}/<camera>/dark[s]/) and
     the single-camera layout ({year}/{night}/dark[s]/), accepts both 'dark' and
     'darks' spellings, the RTS2 target-id convention (00001=dark, 00002=flat),
@@ -764,10 +753,9 @@ def find_calibration_files(archive_base: str, year: str, camera: str,
     calib_subdirs = list(calib_dirs) + [target_id]
 
     if layout == "multi":
-        cam = camera if camera else "*"
-        prefixes = [f"{archive_base}/{year}/*/{cam}"]
+        prefixes = [f"{archive_base}/{year}/*/*"]  # night/<camera>
     else:
-        prefixes = [f"{archive_base}/{year}/*"]
+        prefixes = [f"{archive_base}/{year}/*"]    # night/
 
     files = set()
     for prefix in prefixes:
@@ -1715,7 +1703,7 @@ def process_calibrations(config: CalibConfig, year: str, camera: Optional[str] =
 
     # --- FIND ALL DARK FILES ---
     log(f"\nFinding dark frames across all archive cameras...", "info")
-    dark_files = find_calibration_files(config.archive_base, year, camera, "dark", layout=layout)
+    dark_files = find_calibration_files(config.archive_base, year, "dark", layout=layout)
     log(f"Found {len(dark_files)} dark files", "info")
 
     all_dark_stats = []
@@ -1729,7 +1717,7 @@ def process_calibrations(config: CalibConfig, year: str, camera: Optional[str] =
     all_flat_stats = []
     if not skip_flats:
         log(f"\nFinding flat frames across all archive cameras...", "info")
-        flat_files = find_calibration_files(config.archive_base, year, camera, "flat", layout=layout)
+        flat_files = find_calibration_files(config.archive_base, year, "flat", layout=layout)
         log(f"Found {len(flat_files)} flat files", "info")
 
         if flat_files:
@@ -1748,6 +1736,15 @@ def process_calibrations(config: CalibConfig, year: str, camera: Optional[str] =
     # Get all unique camera IDs
     all_camera_ids = sorted(set(dark_by_camera.keys()) | set(flat_by_camera.keys()))
     log(f"\nDiscovered cameras: {', '.join(all_camera_ids)}", "info")
+
+    # --camera selects a physical camera by its header-derived camera_id
+    # (e.g. andor3567), not the arbitrary directory name. Filter to it here.
+    if camera:
+        matching = [cid for cid in all_camera_ids if cid == camera]
+        if not matching:
+            log(f"No frames found for camera '{camera}'. "
+                f"Available: {', '.join(all_camera_ids) or 'none'}", "warn")
+        all_camera_ids = matching
 
     # --- PROCESS EACH CAMERA ---
     for camera_id in all_camera_ids:
@@ -1837,7 +1834,9 @@ Examples:
     parser.add_argument("--year", "-y", type=str,
                         help="Year to process (e.g., 2024)")
     parser.add_argument("--camera", "-c", type=str,
-                        help="Specific camera to process (e.g., C0, C2)")
+                        help="Process only this physical camera, by its "
+                             "header-derived camera_id (e.g. andor3567), as shown "
+                             "by --list-cameras. Directory names are ignored.")
     parser.add_argument("--output", "-o", type=str,
                         help="Base output directory (default: current directory)")
     parser.add_argument("--dry-run", "-n", action="store_true",
