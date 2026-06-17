@@ -165,6 +165,9 @@ def main():
     ap.add_argument("--workers", "-j", type=int, default=min(os.cpu_count() or 1, 16))
     ap.add_argument("--limit", type=int, default=0, help="Process at most N files (testing)")
     ap.add_argument("--manifest", default=None, help="Manifest TSV path (default: ./reorg-manifest.tsv)")
+    ap.add_argument("--from-manifest", default=None,
+                    help="Execute the plan from a previously written manifest TSV "
+                         "instead of re-classifying (fast; runs exactly that plan)")
     args = ap.parse_args()
 
     source = os.path.abspath(args.source.rstrip("/"))
@@ -182,31 +185,50 @@ def main():
     mode = "EXECUTE" if args.execute else "DRY-RUN"
     print(f"[{mode}] source={source}")
     print(f"[{mode}] dest  ={dest}")
-    print(f"[{mode}] scanning for images...")
-    files = gather_images(source, dest, args.limit)
-    print(f"[{mode}] {len(files)} image files found; classifying with {args.workers} workers")
 
-    # Classify in parallel
-    recs = []
-    done = 0
-    with ProcessPoolExecutor(max_workers=args.workers) as ex:
-        for rec in ex.map(classify, files, chunksize=64):
-            recs.append(rec)
-            done += 1
-            if done % 20000 == 0:
-                print(f"  classified {done}/{len(files)}", flush=True)
+    from collections import Counter
 
-    # Build destinations and detect collisions (two sources -> one dest)
+    if args.from_manifest:
+        # Run directly off a previously written (and reviewed) manifest, skipping
+        # the expensive re-classification. Executes exactly the audited plan.
+        print(f"[{mode}] loading plan from {args.from_manifest}")
+        recs = []
+        with open(args.from_manifest) as fh:
+            next(fh)
+            for line in fh:
+                p = line.rstrip("\n").split("\t")
+                if len(p) >= 4:
+                    recs.append({"src": p[0], "dest": p[1],
+                                 "status": p[2], "detail": p[3]})
+        print(f"[{mode}] {len(recs)} planned actions loaded")
+    else:
+        print(f"[{mode}] scanning for images...")
+        files = gather_images(source, dest, args.limit)
+        print(f"[{mode}] {len(files)} image files found; classifying with {args.workers} workers")
+        recs = []
+        done = 0
+        with ProcessPoolExecutor(max_workers=args.workers) as ex:
+            for rec in ex.map(classify, files, chunksize=64):
+                rec["dest"] = dest_for(rec, source, dest)
+                recs.append(rec)
+                done += 1
+                if done % 20000 == 0:
+                    print(f"  classified {done}/{len(files)}", flush=True)
+
+    # Tally and detect collisions (two sources -> one dest). Camera is taken
+    # from the destination path so this works whether classified now or loaded.
+    def cam_of(r):
+        rel = os.path.relpath(r["dest"], dest)
+        return rel.split(os.sep)[0]
+
     dest_map = {}
     collisions = 0
-    from collections import Counter
     by_status = Counter()
     by_camera = Counter()
     unknown_reason = Counter()
     for r in recs:
-        r["dest"] = dest_for(r, source, dest)
         by_status[r["status"]] += 1
-        by_camera[r["camera"] or "unknown"] += 1
+        by_camera[cam_of(r)] += 1
         if r["status"] != "ok":
             unknown_reason[r["detail"] or "?"] += 1
         dest_map.setdefault(r["dest"], []).append(r["src"])
@@ -227,12 +249,13 @@ def main():
     for r in recs[:8]:
         print(f"    {r['src']}\n      -> {r['dest']}  [{r['status']}]")
 
-    # Write manifest
-    with open(manifest, "w") as mf:
-        mf.write("src\tdest\tstatus\tdetail\n")
-        for r in recs:
-            mf.write(f"{r['src']}\t{r['dest']}\t{r['status']}\t{r['detail']}\n")
-    print(f"\n  manifest written: {manifest}")
+    # Write manifest (skip when we loaded the plan from one)
+    if not args.from_manifest:
+        with open(manifest, "w") as mf:
+            mf.write("src\tdest\tstatus\tdetail\n")
+            for r in recs:
+                mf.write(f"{r['src']}\t{r['dest']}\t{r['status']}\t{r['detail']}\n")
+        print(f"\n  manifest written: {manifest}")
 
     if not args.execute:
         print(f"\n[DRY-RUN] no files moved. Review {manifest}, then re-run with --execute.")
