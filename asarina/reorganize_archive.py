@@ -33,13 +33,21 @@ import os
 import sys
 import argparse
 import datetime
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 try:
     from astropy.io import fits
+    from astropy.utils.exceptions import AstropyWarning
 except ImportError:
     print("Error: astropy is required (pip install astropy)", file=sys.stderr)
     sys.exit(1)
+
+# The experimental-era BOOTES frames trip many FITS verify warnings (non-2880
+# header sizes, null padding, stray cards). astropy still reads them; anything
+# truly unreadable is caught per-file and logged as error/unknown. Silence the
+# flood so progress and the summary stay legible.
+warnings.simplefilter("ignore", AstropyWarning)
 
 from asarina.chip_id import get_camera_id
 
