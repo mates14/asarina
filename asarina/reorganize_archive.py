@@ -166,7 +166,7 @@ def main():
     if not os.path.isdir(source):
         print(f"Error: source not found: {source}", file=sys.stderr)
         sys.exit(1)
-    if not same_filesystem(source, dest):
+    if args.execute and not same_filesystem(source, dest):
         print(f"Error: dest {dest} is NOT on the same filesystem as {source}.\n"
               f"A move would be a slow cross-device copy. Aborting.", file=sys.stderr)
         sys.exit(1)
