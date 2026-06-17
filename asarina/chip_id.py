@@ -124,11 +124,17 @@ CAMERA_PATTERNS = [
     ("CCD_SER", "3567", "andor3567"),
 
     # -------------------------------------------------------------------------
-    # Alta Cameras (BOOTES) - TODO: investigate further
+    # BOOTES accessory cameras. Their drivers often leave CCD_SER / CCD_TYPE
+    # blank and record the identity in CCD_NAME / SERIAL / CHIP / DESCRIPTION
+    # instead. These patterns come after the CCD_SER ones, so a populated serial
+    # still wins (e.g. the SBT/CNF Moravians are matched by CCD_SER above).
     # -------------------------------------------------------------------------
-    # ("CCD_TYPE", "Alta KAF16801E", "alta01e"),
-    # ("CCD_TYPE", "Alta KAF16803", "alta03"),
-    # ("CCD_TYPE", "Alta KAF16803D7", "alta03d7"),
+    ("CCD_TYPE", "Alta KAF16803D7", "alta03d7"),
+    # Apogee Alta (KAF-16803), CCD_SER blank/"0"
+    ("CCD_NAME", "Alta", "alta03d7"),
+    # Moravian G2-1600 (KAF-1603E) accessory; serial truncated to "G2KF1600-0"
+    ("SERIAL", "G2KF1600-0", "mi1600"),
+    ("DESCRIPTION", "G2-1600", "mi1600"),
 
     # -------------------------------------------------------------------------
     # Historical FLI cameras (no longer in use)
@@ -200,6 +206,13 @@ CAMERA_DESCRIPTIONS = {
     "andor1708": "Andor (BOOTES)",
     "andor2499": "Andor (BOOTES)",
     "andor3567": "Andor (BOOTES, also COLORES spectrograph)",
+    "alta03d7": "Apogee Alta KAF-16803D7 (BOOTES accessory)",
+    "mi1600": "Moravian G2-1600 KAF-1603E (BOOTES accessory, truncated serial)",
+    # Generic family fallbacks (CCD_NAME only, specific unit unknown)
+    "andor": "Andor (family; specific serial not recorded)",
+    "mi": "Moravian Instruments (family; specific serial not recorded)",
+    "alta": "Apogee Alta (family; specific serial not recorded)",
+    "fli": "FLI (family; specific serial not recorded)",
     # Ambiguous (couldn't resolve)
     "mi616x": "Moravian G4-16000 (SBT, truncated serial - C1 or C2?)",
     "mi0206": "Moravian G2-1600 (truncated serial - mi2065 or mi2066?)",
@@ -261,7 +274,26 @@ def get_camera_id(header) -> str:
     if ccd_ser and ccd_ser in TRUNCATED_FALLBACKS:
         return TRUNCATED_FALLBACKS[ccd_ser]
 
+    # 4. Family fallback from CCD_NAME when the specific unit can't be pinned
+    #    (e.g. blank serial). Keeps camera families apart instead of collapsing
+    #    everything to 'unknown'; never claims a specific serial it doesn't have.
+    fam = _family_from_ccd_name(header)
+    if fam:
+        return fam
+
     return "unknown"
+
+
+def _family_from_ccd_name(header) -> str:
+    """Generic camera family ('andor'/'mi'/'alta'/'fli') from CCD_NAME, or None."""
+    name = _get_header_value(header, "CCD_NAME")
+    if not name:
+        return None
+    n = name.strip().lower()
+    for fam in ("andor", "alta", "fli", "mi"):
+        if n.startswith(fam):
+            return fam
+    return None
 
 
 # Legacy alias for compatibility
@@ -300,9 +332,15 @@ def get_camera_id_verbose(header) -> tuple:
     if ccd_ser and ccd_ser in TRUNCATED_FALLBACKS:
         return (TRUNCATED_FALLBACKS[ccd_ser], "CCD_SER (fallback)", ccd_ser)
 
+    # 4. Family fallback from CCD_NAME
+    fam = _family_from_ccd_name(header)
+    if fam:
+        return (fam, "CCD_NAME (family)", _get_header_value(header, "CCD_NAME"))
+
     # Not found - dump relevant fields for debugging
     debug_info = {}
-    for field in ("CCD_SER", "CCD_TYPE", "CCD_CHIP", "INSTRUME", "DETECTOR"):
+    for field in ("CCD_SER", "CCD_TYPE", "CCD_NAME", "SERIAL", "CHIP",
+                  "DESCRIPTION", "CCD_CHIP", "INSTRUME", "DETECTOR"):
         try:
             val = header.get(field)
             if val is not None:
