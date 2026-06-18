@@ -149,6 +149,10 @@ class StatsCache:
                 conn.execute("ALTER TABLE stats ADD COLUMN camera_id TEXT")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+            try:
+                conn.execute("ALTER TABLE stats ADD COLUMN readmode TEXT")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
             conn.commit()
 
     def get(self, file_path: str) -> Optional[dict]:
@@ -223,6 +227,12 @@ class StatsCache:
                 if not camera_id:
                     camera_id = ccd_ser_to_camera_id(ccd_ser)  # convert via registry
 
+                readmode, recompute = _resolve_readmode(row, camera_id)
+                if recompute:
+                    conn.execute("DELETE FROM stats WHERE file_path = ?", (file_path,))
+                    conn.commit()
+                    return None
+
                 return {
                     'file': to_str(row['file_path']),
                     'exptime': to_float(row['exptime']),
@@ -237,6 +247,7 @@ class StatsCache:
                     'imagetyp': to_str(row['imagetyp']),
                     'ccd_ser': ccd_ser,
                     'camera_id': camera_id,
+                    'readmode': readmode,
                     'naxis1': to_int(naxis1),
                     'naxis2': to_int(naxis2),
                 }
@@ -285,6 +296,7 @@ class StatsCache:
         skip_naxis = 0
         skip_stats = 0
         skip_error = 0
+        skip_readmode = 0
 
         # Type conversion helpers
         def to_float(v):
@@ -355,6 +367,11 @@ class StatsCache:
                 if not camera_id:
                     camera_id = ccd_ser_to_camera_id(ccd_ser)  # convert via registry
 
+                readmode, recompute = _resolve_readmode(row, camera_id)
+                if recompute:
+                    skip_readmode += 1
+                    continue  # Andor row predating readmode -> recompute
+
                 result[path] = {
                     'file': path,
                     'exptime': to_float(row['exptime']),
@@ -369,6 +386,7 @@ class StatsCache:
                     'imagetyp': to_str(row['imagetyp']),
                     'ccd_ser': ccd_ser,
                     'camera_id': camera_id,
+                    'readmode': readmode,
                     'naxis1': to_int(naxis1),
                     'naxis2': to_int(naxis2),
                 }
@@ -376,7 +394,7 @@ class StatsCache:
                 skip_error += 1
                 continue  # Skip corrupted entries
 
-        log(f"Cache result: {len(result)} valid, skipped: mtime={skip_mtime}, naxis={skip_naxis}, stats={skip_stats}, error={skip_error}", "debug")
+        log(f"Cache result: {len(result)} valid, skipped: mtime={skip_mtime}, naxis={skip_naxis}, stats={skip_stats}, error={skip_error}, readmode={skip_readmode}", "debug")
         return result
 
     def put(self, stats: dict):
@@ -393,8 +411,8 @@ class StatsCache:
             conn.execute("""
                 INSERT OR REPLACE INTO stats
                 (file_path, mtime, exptime, sigma, median, average, ma_diff,
-                 ccd_temp, ccd_set, binning, filter, imagetyp, ccd_ser, camera_id, naxis1, naxis2)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ccd_temp, ccd_set, binning, filter, imagetyp, ccd_ser, camera_id, readmode, naxis1, naxis2)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 stats['file'],
                 mtime,
@@ -410,6 +428,7 @@ class StatsCache:
                 stats['imagetyp'],
                 stats['ccd_ser'] or '',
                 stats.get('camera_id') or '',
+                stats.get('readmode') or '',
                 stats.get('naxis1'),
                 stats.get('naxis2'),
             ))
@@ -441,6 +460,7 @@ class StatsCache:
                     stats['imagetyp'],
                     stats['ccd_ser'] or '',
                     stats.get('camera_id') or '',
+                    stats.get('readmode') or '',
                     stats.get('naxis1'),
                     stats.get('naxis2'),
                 ))
@@ -452,8 +472,8 @@ class StatsCache:
                 conn.executemany("""
                     INSERT OR REPLACE INTO stats
                     (file_path, mtime, exptime, sigma, median, average, ma_diff,
-                     ccd_temp, ccd_set, binning, filter, imagetyp, ccd_ser, camera_id, naxis1, naxis2)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ccd_temp, ccd_set, binning, filter, imagetyp, ccd_ser, camera_id, readmode, naxis1, naxis2)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, rows)
                 conn.commit()
 
@@ -462,6 +482,26 @@ class StatsCache:
         with sqlite3.connect(self.db_path) as conn:
             count = conn.execute("SELECT COUNT(*) FROM stats").fetchone()[0]
             return {'entries': count, 'path': str(self.db_path)}
+
+
+def _resolve_readmode(row, camera_id):
+    """Resolve a cached row's readout-mode signature.
+
+    Returns (readmode, must_recompute). Old cache rows predate the readmode
+    column (value NULL). Only Andor cameras have multiple readout regimes that
+    must be kept apart, so for them a NULL forces a recompute to capture the
+    signature; every other camera has a single implicit regime and gets ''.
+    A stored '' (written by current code for non-Andor frames) is accepted.
+    """
+    try:
+        rm = row['readmode'] if 'readmode' in row.keys() else None
+    except (KeyError, IndexError):
+        rm = None
+    if rm is None:
+        if camera_id and str(camera_id).startswith('andor'):
+            return None, True   # never computed for an Andor frame -> recompute
+        return '', False        # non-Andor: single regime
+    return str(rm), False
 
 
 # Global cache instance
@@ -767,6 +807,69 @@ def find_calibration_files(archive_base: str, year: str,
     return sorted(files)
 
 
+def _logical_true(v) -> bool:
+    """Interpret a FITS logical/int/string as boolean (T/F, 1/0, True/False)."""
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().upper() in ("T", "TRUE", "1", "1.0", "YES", "Y")
+
+
+def _adc_bits(adchanel) -> str:
+    """ADC bit depth from ADCHANEL.
+
+    Old iXon driver stores an index (0 -> 14-bit, 1 -> 16-bit); the modern
+    driver stores a string like '16-bit'. Return just the bit count.
+    """
+    if adchanel is None:
+        return "??"
+    s = str(adchanel).strip()
+    m = re.search(r"(\d+)\s*-?\s*bit", s, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    try:
+        return {0: "14", 1: "16"}.get(int(float(s)), str(int(float(s))))
+    except (ValueError, TypeError):
+        return s
+
+
+def read_mode_signature(header) -> str:
+    """Readout-mode key, mirroring the modern Andor ADCMODE 'CO-01.0-16-2.0'.
+
+    Frames read out in different modes have different read noise and bias and
+    must never be combined, so this signature becomes part of the dark/flat
+    group key, exactly like binning. Format: ``{CO|EM}-{hspeed}-{bits}-{gain}``
+      CO/EM   conventional vs electron-multiplying output register (EMON: the
+              two registers sit on opposite sides of the chip)
+      hspeed  horizontal readout speed (modern driver: MHz; old driver exposed
+              only a table index, kept verbatim - no MHz table in the header)
+      bits    ADC bit depth (ADCHANEL: 0->14, 1->16, or a '16-bit' string)
+      gain    preamp/gain choice (old driver did not expose it; assumed unity)
+
+    The modern driver writes ADCMODE directly and is used verbatim. Cameras with
+    no Andor readout keys (FLI/MI/...) return '' so grouping is unchanged for
+    them (single implicit regime).
+    """
+    adcmode = header.get("ADCMODE")
+    if adcmode is not None and str(adcmode).strip():
+        return str(adcmode).strip()
+
+    emon = header.get("EMON")
+    if emon is None:
+        return ""  # not an Andor old-driver frame: no readout-mode axis
+
+    amp = "EM" if _logical_true(emon) else "CO"
+    hspeed = header.get("HSPEED")
+    hs = "?" if hspeed is None else str(hspeed).strip()
+    try:                       # normalize '0' / '0.0' / '1.0' -> '0' / '1'
+        f = float(hs)
+        hs = str(int(f)) if f == int(f) else str(f)
+    except (ValueError, TypeError):
+        pass
+    bits = _adc_bits(header.get("ADCHANEL"))
+    gain = "1.0"               # old driver: preamp gain not exposed, was unity
+    return f"{amp}-{hs}-{bits}-{gain}"
+
+
 def compute_image_stats(fits_path: str) -> dict:
     """Compute statistics for a FITS image (equivalent to do_sigma.py)."""
     try:
@@ -807,6 +910,7 @@ def compute_image_stats(fits_path: str) -> dict:
                 'imagetyp': header.get('IMAGETYP', None),
                 'ccd_ser': ccd_ser,       # raw value for noise model
                 'camera_id': camera_id,   # short ID for grouping/naming
+                'readmode': read_mode_signature(header),  # readout regime axis
                 'naxis1': data.shape[1],  # width
                 'naxis2': data.shape[0],  # height
             }
@@ -994,23 +1098,27 @@ def group_darks(stats_list: list) -> dict:
             # Round to nearest 5 degrees (e.g., -31.2 -> -30, -33 -> -35)
             temp = 5 * round(temp / 5)
 
-        # Include frame dimensions to avoid mixing different sensor modes
+        # Include frame dimensions to avoid mixing different sensor modes, and
+        # the readout-mode signature so CO/EM-register (and different readout
+        # speed/bit-depth) darks are never combined - they have different noise.
         size = (s.get('naxis1', 0), s.get('naxis2', 0))
-        key = (temp, s['exptime'], s['binning'], size)
+        readmode = s.get('readmode', '') or ''
+        key = (temp, s['exptime'], s['binning'], size, readmode)
         groups[key].append(s)
 
     return dict(groups)
 
 
 def group_flats(stats_list: list) -> dict:
-    """Group flat frames by filter and binning."""
+    """Group flat frames by filter, binning, and readout mode."""
     groups = defaultdict(list)
 
     for s in stats_list:
         if s is None:
             continue
 
-        key = (s['filter'], s['binning'])
+        readmode = s.get('readmode', '') or ''
+        key = (s['filter'], s['binning'], readmode)
         groups[key].append(s)
 
     return dict(groups)
@@ -1112,26 +1220,26 @@ def measure_dark_noise(dark_groups: dict, camera_id: str,
                        n_pairs: int = 60, n_workers: int = None) -> None:
     """Report model-free pair-difference noise per dark group for one camera.
 
-    For each (temp, exp, bin, size) group, diff up to n_pairs random frame pairs,
-    collect the distribution of sigmas, and print the lowest non-zero peak (the
-    physically-correct read-noise floor) alongside the spread. The per-binning
-    minimum of those peaks is the number to drop into CAMERA_NOISE_MODELS.
-    Builds nothing and writes nothing - pure measurement.
+    For each (temp, exp, bin, size, readmode) group, diff up to n_pairs random
+    frame pairs, collect the distribution of sigmas, and print the lowest
+    non-zero peak (the physically-correct read-noise floor) alongside the spread.
+    The lowest peak per (binning, readmode) is the number to drop into
+    CAMERA_NOISE_MODELS. Builds nothing and writes nothing - pure measurement.
     """
     workers = min(n_workers or os.cpu_count() or 1, MAX_WORKERS)
-    log(f"\n{'='*70}", "info")
+    log(f"\n{'='*78}", "info")
     log(f"Noise measurement: {camera_id}  ({n_pairs} pairs/group max)", "info")
-    log(f"{'='*70}", "info")
-    log(f"  {'group':<30} {'N':>4} {'pr':>3} {'floor':>6}   distribution", "info")
+    log(f"{'='*78}", "info")
+    log(f"  {'group':<38} {'N':>4} {'pr':>3} {'floor':>6}   distribution", "info")
 
-    floor_by_bin = defaultdict(list)
-    for key in sorted(dark_groups.keys(), key=lambda k: (k[2], k[1], k[0])):
-        temp, exptime, binning, size = key
+    floor_by_regime = defaultdict(list)
+    for key in sorted(dark_groups.keys(), key=lambda k: (str(k[4]), k[2], k[1], k[0])):
+        temp, exptime, binning, size, readmode = key
         files = [s['file'] for s in dark_groups[key]]
         n = len(files)
-        label = f"t={temp:+d} {exptime:g}s {binning} {size[0]}x{size[1]}"
+        label = f"t={temp:+d} {exptime:g}s {binning} {size[0]}x{size[1]} {readmode or '-'}"
         if n < 2:
-            log(f"  {label:<30} {n:>4} {'--':>3} {'--':>6}   <2 frames", "info")
+            log(f"  {label:<38} {n:>4} {'--':>3} {'--':>6}   <2 frames", "info")
             continue
         all_pairs = list(itertools.combinations(range(n), 2))
         sample = random.sample(all_pairs, n_pairs) if len(all_pairs) > n_pairs else all_pairs
@@ -1144,7 +1252,7 @@ def measure_dark_noise(dark_groups: dict, camera_id: str,
                     sigmas.append(s)
 
         if not sigmas:
-            log(f"  {label:<30} {n:>4} {len(sample):>3} {'--':>6}   no valid pairs", "info")
+            log(f"  {label:<38} {n:>4} {len(sample):>3} {'--':>6}   no valid pairs", "info")
             continue
         arr = np.array(sigmas)
         peak = lowest_noise_peak(sigmas)
@@ -1152,19 +1260,20 @@ def measure_dark_noise(dark_groups: dict, camera_id: str,
         dist = (f"min={arr.min():.2f} med={np.median(arr):.2f} "
                 f"p90={np.percentile(arr, 90):.2f} max={arr.max():.2f} z={n_near_zero}")
         peak_s = f"{peak:.2f}" if peak is not None else "--"
-        log(f"  {label:<30} {n:>4} {len(sample):>3} {peak_s:>6}   {dist}", "info")
+        log(f"  {label:<38} {n:>4} {len(sample):>3} {peak_s:>6}   {dist}", "info")
         if peak is not None:
-            floor_by_bin[binning].append(peak)
+            floor_by_regime[(binning, readmode)].append(peak)
 
     log("", "info")
-    if not floor_by_bin:
+    if not floor_by_regime:
         log(f"No measurable dark groups for {camera_id}.", "warn")
         return
-    log("Suggested noise model (lowest non-zero peak per binning):", "info")
-    for binning, peaks in sorted(floor_by_bin.items()):
+    log("Suggested floor (lowest non-zero peak per binning x readout mode):", "info")
+    for (binning, readmode), peaks in sorted(floor_by_regime.items(), key=lambda kv: (str(kv[0][1]), kv[0][0])):
         floor = min(peaks)
+        mode_note = f"  # readmode {readmode}" if readmode else ""
         log(f'  CAMERA_NOISE_MODELS["{camera_id}"]["{binning}"] = '
-            f"lambda exp, temp: ({floor:.1f}, 0.5)", "info")
+            f"lambda exp, temp: ({floor:.1f}, 0.5){mode_note}", "info")
 
 
 def select_valid_darks(dark_group: list, validate: bool = True) -> list:
@@ -1448,15 +1557,14 @@ def create_master_darks(dark_groups: dict, output_dir: Path, validate: bool = Tr
     master_darks = {}
 
     for key, group in dark_groups.items():
-        # Unpack key - may be (temp, exp, bin) or (temp, exp, bin, size)
-        if len(key) == 4:
-            temp, exptime, binning, size = key
-        else:
-            temp, exptime, binning = key
-            size = None
+        # Unpack key - (temp, exp, bin[, size[, readmode]])
+        temp, exptime, binning = key[0], key[1], key[2]
+        size = key[3] if len(key) >= 4 else None
+        readmode = key[4] if len(key) >= 5 else ""
 
         if len(group) < 2:
-            log(f"Skipping dark group (temp={temp}, exp={exptime}, bin={binning}) - only {len(group)} frames", "warn")
+            log(f"Skipping dark group (temp={temp}, exp={exptime}, bin={binning}, "
+                f"mode={readmode or '-'}) - only {len(group)} frames", "warn")
             continue
 
         # Include frame size in filename if not standard (to distinguish overscan modes)
@@ -1464,14 +1572,18 @@ def create_master_darks(dark_groups: dict, output_dir: Path, validate: bool = Tr
             size_suffix = f"-{size[0]}x{size[1]}"
         else:
             size_suffix = ""
+        # Include readout-mode signature so CO/EM (and other readout regimes)
+        # land in distinct master files.
+        mode_suffix = f"-{readmode}" if readmode else ""
 
         # Simpler filename - camera_id is already in the directory path
-        output_name = f"dark{temp:+04d}-{exptime:05.1f}-{binning}{size_suffix}.fits"
+        output_name = f"dark{temp:+04d}-{exptime:05.1f}-{binning}{size_suffix}{mode_suffix}.fits"
         output_path = output_dir / output_name
+        dark_key = (temp, exptime, binning, size, readmode)
 
         if output_path.exists():
             log(f"{output_name} already exists, skipping", "info")
-            master_darks[(temp, exptime, binning, size)] = str(output_path)
+            master_darks[dark_key] = str(output_path)
             continue
 
         # Select valid darks
@@ -1487,7 +1599,7 @@ def create_master_darks(dark_groups: dict, output_dir: Path, validate: bool = Tr
             log(f"  [DRY-RUN] Would combine: {', '.join(Path(f).name for f in valid_files[:3])}...", "info")
         else:
             if run_mixdark(str(output_path), valid_files):
-                master_darks[(temp, exptime, binning, size)] = str(output_path)
+                master_darks[dark_key] = str(output_path)
                 log(f"  Created {output_name}", "info")
             else:
                 log(f"  Failed to create {output_name}", "error")
@@ -1509,22 +1621,24 @@ def find_matching_dark(flat_stats: dict, master_darks: dict) -> Optional[str]:
     flat_exptime = flat_stats['exptime']
     flat_binning = flat_stats['binning']
     flat_size = (flat_stats.get('naxis1', 0), flat_stats.get('naxis2', 0))
+    flat_readmode = flat_stats.get('readmode', '') or ''
 
     best_match = None
     best_dist = None
 
     for key, dark_path in master_darks.items():
-        # Unpack key - may be (temp, exp, bin) or (temp, exp, bin, size)
-        if len(key) == 4:
-            temp, exptime, binning, size = key
-        else:
-            temp, exptime, binning = key
-            size = None
+        # Unpack key - (temp, exp, bin[, size[, readmode]])
+        temp, exptime, binning = key[0], key[1], key[2]
+        size = key[3] if len(key) >= 4 else None
+        readmode = key[4] if len(key) >= 5 else ""
 
         if binning != flat_binning:
             continue
         # Must match frame size
         if size is not None and size != flat_size:
+            continue
+        # Must match readout mode: dark and flat read through the same register
+        if readmode != flat_readmode:
             continue
 
         if temp is None or flat_temp is None:
@@ -1570,16 +1684,21 @@ def create_master_flats(flat_groups: dict, master_darks: dict, output_dir: Path,
     """Create master flat frames from grouped flats."""
     master_flats = {}
 
-    for (filter_name, binning), group in flat_groups.items():
+    for group_key, group in flat_groups.items():
+        # Key - (filter, bin[, readmode])
+        filter_name, binning = group_key[0], group_key[1]
+        readmode = group_key[2] if len(group_key) >= 3 else ""
         if len(group) < 1:
             continue
 
-        output_name = f"flat-{filter_name}-{binning}.fits"
+        mode_suffix = f"-{readmode}" if readmode else ""
+        output_name = f"flat-{filter_name}-{binning}{mode_suffix}.fits"
         output_path = output_dir / output_name
+        flat_key = (filter_name, binning, readmode)
 
         if output_path.exists():
             log(f"{output_name} already exists, skipping", "info")
-            master_flats[(filter_name, binning)] = str(output_path)
+            master_flats[flat_key] = str(output_path)
             continue
 
         # For each flat, find matching dark and prepare dark-subtracted version
@@ -1615,7 +1734,7 @@ def create_master_flats(flat_groups: dict, master_darks: dict, output_dir: Path,
 
             if len(temp_files) >= 1:
                 if run_mixflat(str(output_path), temp_files):
-                    master_flats[(filter_name, binning)] = str(output_path)
+                    master_flats[flat_key] = str(output_path)
                     log(f"  Created {output_name}", "info")
                 else:
                     log(f"  Failed to create {output_name}", "error")
