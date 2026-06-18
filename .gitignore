@@ -73,3 +73,8 @@ asarina/observe/bgnoise_model.pkl
 *.pdf
 *.odp
 .~lock.*
+
+# archive-reorg artifacts (large, machine-generated)
+reorg-manifest.tsv
+reorg-manifest.tsv.done
+noise-*.out

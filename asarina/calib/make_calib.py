@@ -29,6 +29,7 @@ import tempfile
 import shutil
 import random
 import re
+import itertools
 import sqlite3
 import hashlib
 import struct
@@ -1054,6 +1055,118 @@ def get_camera_noise_params(camera_id: str, binning: str, exptime: float, temp: 
     return bin_model(exptime, temp)
 
 
+def lowest_noise_peak(sigmas: list, zero_floor: float = 0.3) -> Optional[float]:
+    """Center of the lowest non-zero peak in a pair-difference sigma distribution.
+
+    Good dark pairs cluster at the read-noise floor; there is no physical way to
+    do better, so the *lowest* populated grouping (above the all-zero failure
+    spike) is the correct noise. Higher peaks are failures: light leaks, exposed
+    frames, drifting bias. The all-zero spike at ~0 comes from dead/blank darks
+    that do not correct the dark pattern at all (worse than two real darks
+    subtracted), so we drop sigmas <= zero_floor, histogram the rest, lightly
+    smooth, and return the center of the first (lowest-sigma) local maximum that
+    carries at least a quarter of the tallest peak's weight.
+    """
+    s = np.asarray([x for x in sigmas if x is not None and x > zero_floor], dtype=float)
+    if s.size == 0:
+        return None
+    if s.size < 8:
+        return float(np.median(s))
+    lo = float(s.min())
+    hi = float(np.percentile(s, 99))
+    if hi <= lo:
+        return float(np.median(s))
+    nb = max(12, int(round(np.sqrt(s.size))))
+    counts, edges = np.histogram(s, bins=nb, range=(lo, hi))
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    # 3-bin moving-average smoothing to suppress single-bin spikes
+    sm = np.convolve(counts.astype(float), np.ones(3) / 3.0, mode="same")
+    thresh = 0.25 * sm.max()
+    for i in range(sm.size):
+        left = sm[i - 1] if i > 0 else 0.0
+        right = sm[i + 1] if i < sm.size - 1 else 0.0
+        if sm[i] >= thresh and sm[i] >= left and sm[i] >= right:
+            return float(centers[i])
+    return float(centers[int(np.argmax(sm))])
+
+
+def _measure_pair_sigma(args: tuple) -> float:
+    """Row-median sigma of the difference of two darks (model-free, quiet).
+
+    Same metric validate_dark_pair() uses, with no accept/reject window and no
+    logging, so it can be mapped over thousands of pairs. Returns -1.0 on any
+    read error (filtered out by the caller).
+    """
+    file1, file2 = args
+    try:
+        with fits.open(file1) as h1, fits.open(file2) as h2:
+            data1 = image_hdu(h1).data.astype(np.float32)
+            data2 = image_hdu(h2).data.astype(np.float32)
+        diff = data1 - data2
+        return float(np.median(np.std(diff, axis=1)))
+    except Exception:
+        return -1.0
+
+
+def measure_dark_noise(dark_groups: dict, camera_id: str,
+                       n_pairs: int = 60, n_workers: int = None) -> None:
+    """Report model-free pair-difference noise per dark group for one camera.
+
+    For each (temp, exp, bin, size) group, diff up to n_pairs random frame pairs,
+    collect the distribution of sigmas, and print the lowest non-zero peak (the
+    physically-correct read-noise floor) alongside the spread. The per-binning
+    minimum of those peaks is the number to drop into CAMERA_NOISE_MODELS.
+    Builds nothing and writes nothing - pure measurement.
+    """
+    workers = min(n_workers or os.cpu_count() or 1, MAX_WORKERS)
+    log(f"\n{'='*70}", "info")
+    log(f"Noise measurement: {camera_id}  ({n_pairs} pairs/group max)", "info")
+    log(f"{'='*70}", "info")
+    log(f"  {'group':<30} {'N':>4} {'pr':>3} {'floor':>6}   distribution", "info")
+
+    floor_by_bin = defaultdict(list)
+    for key in sorted(dark_groups.keys(), key=lambda k: (k[2], k[1], k[0])):
+        temp, exptime, binning, size = key
+        files = [s['file'] for s in dark_groups[key]]
+        n = len(files)
+        label = f"t={temp:+d} {exptime:g}s {binning} {size[0]}x{size[1]}"
+        if n < 2:
+            log(f"  {label:<30} {n:>4} {'--':>3} {'--':>6}   <2 frames", "info")
+            continue
+        all_pairs = list(itertools.combinations(range(n), 2))
+        sample = random.sample(all_pairs, n_pairs) if len(all_pairs) > n_pairs else all_pairs
+        pair_args = [(files[i], files[j]) for i, j in sample]
+
+        sigmas = []
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            for s in ex.map(_measure_pair_sigma, pair_args, chunksize=4):
+                if s > 0:
+                    sigmas.append(s)
+
+        if not sigmas:
+            log(f"  {label:<30} {n:>4} {len(sample):>3} {'--':>6}   no valid pairs", "info")
+            continue
+        arr = np.array(sigmas)
+        peak = lowest_noise_peak(sigmas)
+        n_near_zero = int((arr <= 0.3).sum())
+        dist = (f"min={arr.min():.2f} med={np.median(arr):.2f} "
+                f"p90={np.percentile(arr, 90):.2f} max={arr.max():.2f} z={n_near_zero}")
+        peak_s = f"{peak:.2f}" if peak is not None else "--"
+        log(f"  {label:<30} {n:>4} {len(sample):>3} {peak_s:>6}   {dist}", "info")
+        if peak is not None:
+            floor_by_bin[binning].append(peak)
+
+    log("", "info")
+    if not floor_by_bin:
+        log(f"No measurable dark groups for {camera_id}.", "warn")
+        return
+    log("Suggested noise model (lowest non-zero peak per binning):", "info")
+    for binning, peaks in sorted(floor_by_bin.items()):
+        floor = min(peaks)
+        log(f'  CAMERA_NOISE_MODELS["{camera_id}"]["{binning}"] = '
+            f"lambda exp, temp: ({floor:.1f}, 0.5)", "info")
+
+
 def select_valid_darks(dark_group: list, validate: bool = True) -> list:
     """
     Select valid darks from a group using sequential consensus validation.
@@ -1808,6 +1921,49 @@ def process_calibrations(config: CalibConfig, year: str, camera: Optional[str] =
             log("No flat files for this camera", "warn")
 
 
+def run_measure_noise(config: CalibConfig, year: str, camera: Optional[str] = None,
+                      n_workers: int = None, layout: str = "auto",
+                      n_pairs: int = 60):
+    """Measure model-free dark-difference noise per camera/group and exit.
+
+    Mirrors the discovery + stats + camera grouping of process_calibrations, but
+    skips quality filtering and master-frame creation: it diffs raw dark pairs so
+    the full noise distribution is visible (the lowest-peak finder picks out the
+    good cluster even when exposed/dead frames are mixed in). Use it to derive a
+    CAMERA_NOISE_MODELS entry for a camera that has none (e.g. andor1708).
+    """
+    log(f"Measuring dark noise for {year} from {config.archive_base}", "info")
+    if layout == "auto":
+        layout = detect_layout(config.archive_base, year)
+    log(f"Archive layout: {layout}-camera", "info")
+
+    dark_files = find_calibration_files(config.archive_base, year, "dark", layout=layout)
+    log(f"Found {len(dark_files)} dark files", "info")
+    if not dark_files:
+        log("No dark files found.", "warn")
+        return
+
+    all_dark_stats = compute_stats_parallel(dark_files, "dark", n_workers=n_workers)
+    log(f"Valid dark frames: {len(all_dark_stats)}", "info")
+
+    dark_by_camera = group_by_camera_id(all_dark_stats)
+    all_camera_ids = sorted(dark_by_camera.keys())
+    log(f"Discovered cameras: {', '.join(all_camera_ids) or 'none'}", "info")
+    if camera:
+        all_camera_ids = [cid for cid in all_camera_ids if cid == camera]
+        if not all_camera_ids:
+            log(f"No darks for camera '{camera}'.", "warn")
+            return
+
+    for camera_id in all_camera_ids:
+        dark_stats = dark_by_camera.get(camera_id, [])
+        if not dark_stats:
+            continue
+        # No filtering: measure the raw distribution, model-free.
+        dark_groups = group_darks(dark_stats)
+        measure_dark_noise(dark_groups, camera_id, n_pairs=n_pairs, n_workers=n_workers)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Automatic calibration frame processing",
@@ -1861,6 +2017,15 @@ Examples:
                         help="Number of parallel workers (default: auto, max 16)")
     parser.add_argument("--stats-only", "-s", action="store_true",
                         help="Only compute statistics (populate cache), don't create masters")
+    parser.add_argument("--measure-noise", action="store_true",
+                        help="Measure model-free dark-difference noise per group "
+                             "and exit (no masters built). Reports the lowest "
+                             "non-zero peak per binning = the read-noise floor to "
+                             "put in CAMERA_NOISE_MODELS. Use for a camera with no "
+                             "model yet (e.g. andor1708).")
+    parser.add_argument("--measure-pairs", type=int, default=60,
+                        help="Max random dark pairs to diff per group in "
+                             "--measure-noise mode (default: 60)")
     parser.add_argument("--cache-stats", action="store_true",
                         help="Show cache statistics and exit")
     parser.add_argument("--clear-cache", action="store_true",
@@ -1923,6 +2088,18 @@ Examples:
     if not args.year:
         print("Error: --year is required for processing")
         sys.exit(1)
+
+    # Noise-measurement mode: report dark-difference noise and exit
+    if args.measure_noise:
+        run_measure_noise(
+            config=config,
+            year=args.year,
+            camera=args.camera,
+            n_workers=args.workers,
+            layout=args.layout,
+            n_pairs=args.measure_pairs,
+        )
+        return
 
     # Process calibrations
     process_calibrations(
