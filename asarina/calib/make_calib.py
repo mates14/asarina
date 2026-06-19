@@ -1206,7 +1206,13 @@ def lowest_noise_peak(sigmas: list, zero_floor: float = 0.3) -> Optional[float]:
     if s.size < 8:
         return float(np.median(s))
     lo = float(s.min())
-    hi = float(np.percentile(s, 99))
+    # Clip the upper edge to a robust bound. A heavy contamination tail (exposed
+    # frames pushing pair-sigma to hundreds) would otherwise drive the histogram
+    # range to p99 ~ hundreds, blow up the bin width, and smear the read-noise
+    # cluster (~few ADU) into a high-centred bin - reporting e.g. 71 when the
+    # true floor is 3.4. 3*median tracks the floor when clean darks dominate;
+    # p95 caps it when they do not. The low cluster is then finely resolved.
+    hi = float(min(np.percentile(s, 95), 3.0 * np.median(s)))
     if hi <= lo:
         return float(np.median(s))
     nb = max(12, int(round(np.sqrt(s.size))))
