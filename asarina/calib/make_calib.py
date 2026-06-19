@@ -534,6 +534,20 @@ CAMERA_NOISE_MODELS = {
         "1x1": lambda exp, temp: (3.0, 0.5),
         "2x2": lambda exp, temp: (3.0, 0.5),  # TODO: verify if 2x2 darks appear
     },
+    # BOOTES-2 Andor iXon, serial 1708 - REGIME-KEYED (by readout mode), because
+    # the conventional and EM output registers have very different read noise.
+    # Floors from --measure-noise on 2009 (noise-andor1708): pair-difference
+    # sigma flat across 1-60 s at the cold setpoints, read-noise dominated.
+    #   CO-0-14-1.0 (conventional, 14-bit): floor ~2.2 ADU (= the ~2.2 read noise)
+    #   EM-0/EM-1   (EM register, 14-bit):  floor ~3.8 ADU (EM excess noise)
+    # The lone -140 C / 1.18-ADU EM-1 cluster is a spurious-temperature (likely
+    # high-EM-gain) outlier that cannot be keyed (old driver omits EMCCDGAIN); it
+    # falls below this window and is correctly rejected rather than averaged in.
+    "andor1708": {
+        "CO-0-14-1.0": {"1x1": lambda exp, temp: (2.2, 0.5)},
+        "EM-0-14-1.0": {"1x1": lambda exp, temp: (3.8, 0.6)},
+        "EM-1-14-1.0": {"1x1": lambda exp, temp: (3.8, 0.6)},
+    },
     "fli534": {  # FLI IMG4710 EEV CCD47-10, serial suffix 258.534
         # sigma = sqrt(5.72² + 0.0595 * exptime), from fit to noise-fli534.out
         "1x1": lambda exp, temp: (math.sqrt(5.72**2 + 0.0595 * exp), 0.10),
@@ -1155,9 +1169,20 @@ def validate_dark_pair(file1: str, file2: str, expected_sigma: float, tolerance:
         return False, -1.0
 
 
-def get_camera_noise_params(camera_id: str, binning: str, exptime: float, temp: float) -> tuple:
-    """Get expected noise parameters for a camera (by camera_id from registry)."""
+def get_camera_noise_params(camera_id: str, binning: str, exptime: float,
+                            temp: float, readmode: str = "") -> tuple:
+    """Get expected noise parameters for a camera (by camera_id from registry).
+
+    A camera entry is either binning-keyed ({"1x1": lambda, ...}) or, when its
+    readout regimes have materially different floors (e.g. the andor1708 iXon:
+    conventional ~2.2 ADU vs EM-register ~3.8 ADU), readmode-keyed
+    ({"CO-0-14-1.0": {"1x1": lambda, ...}, ...}). Descend by readmode first in
+    that case, falling back to DEFAULT for an unlisted regime.
+    """
     model = CAMERA_NOISE_MODELS.get(camera_id, DEFAULT_NOISE_MODEL)
+    # Regime-keyed camera: values are per-binning sub-dicts, not callables.
+    if model and all(isinstance(v, dict) for v in model.values()):
+        model = model.get(readmode) or model.get("", DEFAULT_NOISE_MODEL)
     bin_model = model.get(binning, model.get("1x1", DEFAULT_NOISE_MODEL["1x1"]))
 
     return bin_model(exptime, temp)
@@ -1232,7 +1257,8 @@ def measure_dark_noise(dark_groups: dict, camera_id: str,
     log(f"{'='*78}", "info")
     log(f"  {'group':<38} {'N':>4} {'pr':>3} {'floor':>6}   distribution", "info")
 
-    floor_by_regime = defaultdict(list)
+    floor_by_regime = defaultdict(list)   # per-group peaks (display only)
+    sigmas_by_regime = defaultdict(list)  # all pair sigmas pooled per regime
     for key in sorted(dark_groups.keys(), key=lambda k: (str(k[4]), k[2], k[1], k[0])):
         temp, exptime, binning, size, readmode = key
         files = [s['file'] for s in dark_groups[key]]
@@ -1263,14 +1289,22 @@ def measure_dark_noise(dark_groups: dict, camera_id: str,
         log(f"  {label:<38} {n:>4} {len(sample):>3} {peak_s:>6}   {dist}", "info")
         if peak is not None:
             floor_by_regime[(binning, readmode)].append(peak)
+        sigmas_by_regime[(binning, readmode)].extend(sigmas)
 
     log("", "info")
-    if not floor_by_regime:
+    if not sigmas_by_regime:
         log(f"No measurable dark groups for {camera_id}.", "warn")
         return
+    # Floor = lowest non-zero peak of ALL pooled pairs in the regime, not the min
+    # of per-group peaks: pooling weights by sample count, so a small anomalous
+    # group (e.g. a spurious-temperature cluster) is diluted below the peak
+    # threshold instead of dragging the suggested floor down.
     log("Suggested floor (lowest non-zero peak per binning x readout mode):", "info")
-    for (binning, readmode), peaks in sorted(floor_by_regime.items(), key=lambda kv: (str(kv[0][1]), kv[0][0])):
-        floor = min(peaks)
+    for (binning, readmode), pooled in sorted(sigmas_by_regime.items(),
+                                              key=lambda kv: (str(kv[0][1]), kv[0][0])):
+        floor = lowest_noise_peak(pooled)
+        if floor is None:
+            continue
         mode_note = f"  # readmode {readmode}" if readmode else ""
         log(f'  CAMERA_NOISE_MODELS["{camera_id}"]["{binning}"] = '
             f"lambda exp, temp: ({floor:.1f}, 0.5){mode_note}", "info")
@@ -1301,8 +1335,9 @@ def select_valid_darks(dark_group: list, validate: bool = True) -> list:
     binning = first['binning']
     exptime = first['exptime']
     temp = first['ccd_temp'] or -30
+    readmode = first.get('readmode', '') or ''
 
-    expected_sigma, tolerance = get_camera_noise_params(camera_id, binning, exptime, temp)
+    expected_sigma, tolerance = get_camera_noise_params(camera_id, binning, exptime, temp, readmode)
 
     log(f"  Noise model: camera={camera_id}, exp={exptime}, expected_sigma={expected_sigma:.2f} ± {tolerance:.2f}", "debug")
 
