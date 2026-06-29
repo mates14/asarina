@@ -415,7 +415,11 @@ def main():
     parser.set_defaults(**defaults)
     args = parser.parse_args(remaining)
 
-    logging.basicConfig(stream=sys.stderr, format='%(levelname)s %(name)s: %(message)s')
+    logging.basicConfig(
+        stream=sys.stderr,
+        format='%(asctime)s %(levelname)s: %(message)s',
+        datefmt='%H:%M:%S',
+    )
     logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.INFO)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
 
@@ -423,6 +427,8 @@ def main():
     if not raw_path.exists():
         logger.error(f"File not found: {raw_path}")
         sys.exit(1)
+
+    logger.info(f"Start processing {raw_path.name}")
 
     # Read what we need from the raw header before anyone touches it
     with fits.open(str(raw_path)) as hdul:

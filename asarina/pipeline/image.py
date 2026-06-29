@@ -27,8 +27,6 @@ CAMERA_CROPS = {
     'mi0315': np.s_[19:1218, 215:1414],   # Makak zenith camera
 }
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 
@@ -657,8 +655,12 @@ def main():
     parser.set_defaults(**defaults)
     args = parser.parse_args(remaining)
 
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+    logging.basicConfig(
+        stream=sys.stderr,
+        format='%(asctime)s %(levelname)s: %(message)s',
+        datefmt='%H:%M:%S',
+    )
+    logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.INFO)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
