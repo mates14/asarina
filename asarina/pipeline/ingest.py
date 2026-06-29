@@ -183,10 +183,12 @@ class PhotometryPipeline:
         Returns the basename of the calibrated FITS file inside temp_dir,
         or None on failure.
         """
+        t = time.time()
         if self.smart_dark_calib:
             result = self._calibrate_smart_dark(image_path, temp_dir)
         else:
             result = self._calibrate_standard(image_path, temp_dir)
+        logger.info(f"calibrate took {time.time()-t:.3f}s")
 
         if result is not None and self.makak_mode:
             cal_path = temp_dir / result

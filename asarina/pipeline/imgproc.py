@@ -94,7 +94,6 @@ def _copy_wcs_to_raw(calibrated_path: Path, raw_path: Path, chip_id: str,
     ecsv_path, if given, is read for ASTSCATT/ASTWSSR/IDNUM quality checks.
     These keywords live in the ECSV metadata, not the FITS header.
     """
-    from astropy.table import Table
     crop = CAMERA_CROPS.get(chip_id)
     col_offset = crop[1].start if crop is not None else 0
     row_offset = crop[0].start if crop is not None else 0
@@ -118,6 +117,7 @@ def _copy_wcs_to_raw(calibrated_path: Path, raw_path: Path, chip_id: str,
         # Quality check from ECSV metadata (authoritative source).
         # ASTSCATT and IDNUM (matched-star count) live there, not in the FITS header.
         if ecsv_path is not None and ecsv_path.exists():
+            from astropy.table import Table
             meta = Table.read(str(ecsv_path), format='ascii.ecsv').meta
             astscatt = meta.get('ASTSCATT')
             astwssr  = meta.get('ASTWSSR')
@@ -519,7 +519,7 @@ def main():
         # 5. Report to RTS2 — corrwerr must be on stdout, nothing else may be
         if args.realtime:
             _corrwerr(calibrated, raw_header, chip_id)
-            logger.info(f"corrwerr produced in {time.time() - t_start:.1f}s")
+            logger.info(f"corrwerr took {time.time() - t_start:.1f}s from start")
 
         # --- RTS2 reads corrwerr and begins archiving the raw image ---
 
@@ -562,7 +562,7 @@ def main():
             fits_for_transients = str(dft) if dft.exists() else str(calibrated)
             TransientSearcher().search_transients(ecsv_path, fits_for_transients)
 
-        logger.info(f"imgproc total run time {time.time() - t_start:.1f}s")
+        logger.info(f"imgproc took {time.time() - t_start:.1f}s total")
 
 
 if __name__ == '__main__':
