@@ -428,7 +428,8 @@ def main():
         logger.error(f"File not found: {raw_path}")
         sys.exit(1)
 
-    logger.info(f"Start processing {raw_path.name}")
+    t_start = time.time()
+    logger.info(f"took 0.0s (start): {raw_path.name}")
 
     # Read what we need from the raw header before anyone touches it
     with fits.open(str(raw_path)) as hdul:
@@ -461,7 +462,6 @@ def main():
             logger.info(f"Result already exists: {existing} (use -f to reprocess)")
             sys.exit(0)
 
-    t_start = time.time()
     with tempfile.TemporaryDirectory(prefix='imgproc.') as _tmpdir:
         temp_dir = Path(_tmpdir)
 
