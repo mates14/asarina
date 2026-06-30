@@ -116,7 +116,7 @@ class PhotometryPipeline:
         processor = ImageProcessor(calib_root=self.calib_root,
                                    calib_dir_template=self.calib_dir_template)
         processor.load_calibration_frames([str(image_path)])
-        processed = processor.process_all_objects(output_dir=str(temp_dir), overwrite=True)
+        processed = processor.process_all_objects(output_dir=str(temp_dir), overwrite=True, photometry=False)
         if not processed:
             logger.error(f"Dark/flat correction produced no output for {image_path.name}")
             return None
