@@ -26,6 +26,7 @@ Recognised keys (underscores or dashes interchangeable):
   stat_dir          str
   model_file        str
   ssh_key           str
+  ancat_dir         str    (local sky-catalog dir for web-preview annotation)
 
 Example /etc/asarina/config:
   [C2]

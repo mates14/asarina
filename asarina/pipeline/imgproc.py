@@ -12,6 +12,7 @@ Sequence:
   3. phcat + dophot solve pass on calibrated image
   4. copy WCS from calibrated back into raw image (then release raw)
   5. print corrwerr to stdout  ← RTS2 archives the raw image after this
+  5.5. re-generate web preview with sky annotations (WCS now available)
   6. dophot photometry pass
   7. save ECSV/PNG results
   8. upload ECSV to database server
@@ -223,7 +224,9 @@ def _corrwerr(calibrated_path: Path, raw_header: fits.Header,
 
 
 def _make_web_image(calibrated_path: Path, ccd_name: str,
-                    web_dir: str = "/var/www/info") -> None:
+                    web_dir: str = "/var/www/info",
+                    annotate: bool = False,
+                    catalog_dir: Optional[str] = None) -> None:
     """Generate web preview images from the calibrated FITS file.
 
     Replaces c0toweb.sh.  Uses the calibrated (dark/flat corrected) image
@@ -231,6 +234,11 @@ def _make_web_image(calibrated_path: Path, ccd_name: str,
     or if the cadence limit (3 s) has not elapsed.
 
     ccd_name is the RTS2 camera name (e.g. 'C0'), taken from CCD_NAME header.
+
+    annotate/catalog_dir enable pyrt-f2cj's sky annotation (NGC/IC, bright
+    stars, GCVS variables) — only useful once the calibrated image has a WCS
+    (i.e. after pipeline.solve()), so the first, pre-solve call should leave
+    these at their defaults.
     """
     lock_path = Path(f"/dev/shm/{ccd_name}.lock")
     temp_fits  = Path(f"/dev/shm/{ccd_name}.fits")
@@ -262,11 +270,14 @@ def _make_web_image(calibrated_path: Path, ccd_name: str,
         info_txt   = web / f"{ccd_name}_info.txt"
 
         # FITS → JPEG  (%H:%M in the label is expanded by f2cj from DATE-OBS)
-        ret = subprocess.run(
-            ["pyrt-f2cj", "--label", f"D50 {ccd_name} - %H:%M",
-             "-o", str(full_jpg), "-i", str(temp_fits)],
-            capture_output=True,
-        )
+        cmd = ["pyrt-f2cj", "--label", f"D50 {ccd_name} - %H:%M",
+               "-o", str(full_jpg), "-i", str(temp_fits)]
+        if annotate:
+            if catalog_dir:
+                cmd += ["-a", "--catalog-dir", catalog_dir]
+            else:
+                logger.debug("web image: annotate requested but no ancat_dir configured, skipping annotation")
+        ret = subprocess.run(cmd, capture_output=True)
         if ret.returncode != 0:
             logger.warning("f2cj failed, web image not updated")
             return
@@ -383,6 +394,10 @@ def main():
     output.add_argument('--stat-dir', metavar='DIR', dest='stat_dir',
                         help='Directory for per-night photometric stat ECSVs '
                              '(default: RTS2_STAT_DIR env var, or disabled if unset)')
+    output.add_argument('--ancat-dir', metavar='DIR', dest='ancat_dir',
+                        help='Local sky-catalog directory (ngc2000.fits, brightstars.fits, '
+                             'gcvs.fits — see pyrt-fetch-gcvs) for annotating the web preview '
+                             'once WCS is available; unset disables annotation')
 
     calib = parser.add_argument_group('calibration')
     calib.add_argument('--smart-dark', metavar='CALIB.npy',
@@ -520,6 +535,18 @@ def main():
         if args.realtime:
             _corrwerr(calibrated, raw_header, chip_id)
             logger.info(f"corrwerr took {time.time() - t_start:.1f}s from start")
+
+        # 5.5. Re-generate the web preview, now annotated — the WCS wasn't
+        # available for step 2's pre-solve preview.  Join the step-2 thread
+        # first: it shares the same /dev/shm lock/temp files, and without
+        # joining, this call could see the lock still held and skip, or race
+        # step 2's write; joining also guarantees the annotated version is
+        # the one left on disk.
+        if args.realtime:
+            if web_thread is not None:
+                web_thread.join(timeout=30)
+            _make_web_image(calibrated, ccd_name, annotate=True,
+                            catalog_dir=args.ancat_dir)
 
         # --- RTS2 reads corrwerr and begins archiving the raw image ---
 
