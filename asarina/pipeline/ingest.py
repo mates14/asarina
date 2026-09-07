@@ -285,10 +285,9 @@ class PhotometryPipeline:
         logger.info(f"pyrt-cat2det took {time.time()-t:.3f}s")
 
         # Build pyrt-dophot command
-        terms = self.dophot_terms or ".r3,.p3,.l"
-        idlimit = self.dophot_idlimit if self.dophot_idlimit is not None else 2
-        dophot_base = ["pyrt-dophot", "-m0.5", "-az", f"-S{sip}",
-                       "-U", terms, f"-i{idlimit}"]
+        terms = self.dophot_terms or "&.r3,&.p3"
+        dophot_base = ["pyrt-dophot", "-m0.5", "-a", f"-S{sip}",
+                       "-U", terms]
         if self.dophot_max_stars:
             dophot_base += ["--max-stars", str(self.dophot_max_stars)]
         if self.dophot_model:
@@ -306,8 +305,18 @@ class PhotometryPipeline:
         pass_inputs = [det_file] + [ecsv_file] * (passes - 1)
         for pass_num, input_file in enumerate(pass_inputs, start=1):
             t = time.time()
+            extra = []
+            if pass_num == 1:
+                if self.dophot_idlimit is not None:
+                    extra.append(f"-i{self.dophot_idlimit}")
+            else:
+                extra.append("-z")
+
+            logger.debug(f"pyrt-dophot pass {pass_num} cmd: "
+                         f"{dophot_base + extra + [input_file]}")
+
             ret = subprocess.run(
-                dophot_base + [input_file],
+                dophot_base + extra + [input_file],
                 cwd=str(temp_dir), capture_output=True, text=True,
             )
             elapsed = time.time() - t
