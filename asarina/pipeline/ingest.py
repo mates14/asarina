@@ -277,7 +277,8 @@ class PhotometryPipeline:
         Returns the ECSV basename on success, None on failure.
 
         passes controls the total number of dophot iterations.
-        sip is the SIP polynomial order passed to pyrt-dophot via -S.
+        sip is the SIP polynomial order for the first pass (0, 1 or 2);
+        later passes escalate to 2 unless SIP is disabled entirely.
         """
         det_file  = fits_file.replace('.fits', '.det')
         ecsv_file = fits_file.replace('.fits', '.ecsv')
@@ -298,16 +299,15 @@ class PhotometryPipeline:
         logger.info(f"pyrt-cat2det took {time.time()-t:.3f}s")
 
         # Build pyrt-dophot command
+        # Both sites drive the terms from the command line - BART's Kodak
+        # chips need the .l linearity term, D50's do not and prefer the "&"
+        # speed forms - so this default only ever covers a bare invocation.
         terms = self.dophot_terms or ".r3,.p3,.l"
         idlimit = self.dophot_idlimit if self.dophot_idlimit is not None else 2
-        # -a always refits the astrometry (CD + SIP); -z additionally refits
-        # the ZPN radial terms and is only added when explicitly enabled.
-        # -S is set per pass below (raised after the first pass), so it is not
-        # part of the shared base command.
+        # -a always refits the astrometry (CD + SIP).  -S and -z are not here:
+        # both escalate per pass, and neither is applied to the first one.
         dophot_base = ["pyrt-dophot", "-m0.5", "-a",
                        "-U", terms, f"-i{idlimit}"]
-        if self.dophot_refit_zpn:
-            dophot_base.append("-z")
         if self.dophot_max_stars:
             dophot_base += ["--max-stars", str(self.dophot_max_stars)]
         if self.dophot_model:
@@ -321,17 +321,30 @@ class PhotometryPipeline:
         if self.makak_mode:
             dophot_base.append("-k")
 
+        # pyrt-dophot implements SIP orders 0 (off), 1 and 2 and nothing above
+        # 2, so a higher request is clamped rather than passed through.
+        sip = min(sip, 2)
+
         # Photometry + astrometry refit over N passes
         pass_inputs = [det_file] + [ecsv_file] * (passes - 1)
         for pass_num, input_file in enumerate(pass_inputs, start=1):
-            # First pass runs at the requested SIP order (conservative, since it
-            # works off the rough field-solve WCS); later passes raise it to at
-            # least 2 to absorb non-radial distortion the ZPN can't. SIP=0
-            # (explicitly disabled) is left untouched.
-            pass_sip = sip if (pass_num == 1 or sip <= 0) else max(sip, 2)
+            # The first pass works off the rough field-solve WCS, so it stays
+            # deliberately conservative: the requested SIP order, and never the
+            # ZPN refit - on a subsampled star list that is under-constrained
+            # and runs away (PV2_5 -> -5290 and the like).  Later passes have a
+            # real solution to build on, so SIP escalates to 2 and the ZPN
+            # radial terms are refitted when --refit-zpn asks for it.  An
+            # explicitly disabled SIP (0) is left alone throughout.
+            pass_sip = sip if (pass_num == 1 or sip <= 0) else 2
+            extra = [f"-S{pass_sip}"]
+            if pass_num > 1 and self.dophot_refit_zpn:
+                extra.append("-z")
             t = time.time()
+            logger.debug(f"pyrt-dophot pass {pass_num} cmd: "
+                         f"{dophot_base + extra + [input_file]}")
+
             ret = subprocess.run(
-                dophot_base + [f"-S{pass_sip}", input_file],
+                dophot_base + extra + [input_file],
                 cwd=str(temp_dir), capture_output=True, text=True,
             )
             elapsed = time.time() - t

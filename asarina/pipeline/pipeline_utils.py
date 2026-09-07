@@ -214,6 +214,16 @@ class TransientSearcher:
         """
         try:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            # The blocking wait here is load-bearing, not incidental: the paths
+            # we hand over point inside imgproc's TemporaryDirectory, which is
+            # torn down as soon as this returns, and the daemon copies both
+            # files into its own work dir before it answers.  So the timeout
+            # has to be generous - it only exists so that a daemon wedged
+            # between accept() and its reply cannot hang us indefinitely.
+            # Without it, RTS2's astrometry_timeout (300 s) is what eventually
+            # kills the process, and with num_proc slots all stuck that way
+            # image processing stops altogether.
+            sock.settimeout(120)
             sock.connect(self.socket_path)
             sock.send(json.dumps({
                 'ecsv_path': ecsv_path,

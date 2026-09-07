@@ -651,8 +651,10 @@ def main():
     phot.add_argument('--dophot-idlimit', type=int, metavar='N')
     phot.add_argument('--dophot-max-stars', type=int, default=1000, metavar='N')
     phot.add_argument('--refit-zpn', action='store_true',
-                      help='Refit ZPN radial terms (pyrt-dophot -z). Off by '
-                           'default: unstable on a subsampled star list.')
+                      help='Refit ZPN radial terms (pyrt-dophot -z) from the '
+                           'second pass on. Off by default, and never applied '
+                           'to the first pass: on a subsampled star list the '
+                           'refit is under-constrained and runs away.')
     phot.add_argument('--astscatt-max', type=float, default=0.5, metavar='PX',
                       help='Reject solutions with ASTSCATT >= this (px). '
                            'Default 0.5.')
