@@ -183,12 +183,57 @@ def _report_fwhm(cat_path: Path, ccd_name: str) -> None:
         logger.error(f"Failed to report FWHM: {e}")
 
 
+def _is_newest(ccd_name: str, ctime: Optional[float]) -> bool:
+    """True if this is the newest frame seen so far for this camera.
+
+    RTS2's imgproc dispatches its queue LIFO across num_proc slots, so
+    whenever the pipeline falls behind - a fast-cadence target, or the
+    daytime `imageglob` catch-up over the backlog left in queue/ - frames
+    keep arriving long after newer ones have already been processed.  Those
+    must not overwrite state that stands for the telescope's current
+    condition: the web preview and the live FWHM value.  Measurements are
+    a different matter and keep being reported for every frame - see
+    _corrwerr().
+
+    The high-water mark lives in /dev/shm beside the preview's own lock and
+    temp file.  It is therefore lost on reboot, and the first frame after
+    one is treated as current - which is right during a night and costs at
+    most a single overwritten preview if a reboot lands mid-backlog.
+
+    Returns True (and advances the mark) when ctime is at or past it, so a
+    frame with no CTIME at all is treated as current rather than silently
+    demoted.
+    """
+    if ctime is None:
+        return True
+    mark = Path(f"/dev/shm/{ccd_name}.ctime")
+    try:
+        if ctime < float(mark.read_text().strip()):
+            return False
+    except (OSError, ValueError):
+        pass
+    try:
+        mark.write_text(f"{ctime:.6f}\n")
+    except OSError as e:
+        logger.warning(f"cannot update {mark}: {e}")
+    return True
+
+
 def _corrwerr(calibrated_path: Path, raw_header: fits.Header,
               chip_id: str) -> None:
     """Compute and print the corrwerr line for RTS2.
 
     Format: corrwerr 1 ra dec ra_offset dec_offset angular_separation
     All values in degrees.  Printed to stdout and flushed immediately.
+
+    This runs for every frame the caller asked to process in real time,
+    stale ones included: the offsets are measurements that go on to the
+    image database and the pointing statistics, so they must be reported
+    as measured.  Whether an offset is still fresh enough to move the
+    mount is RTS2's call, not ours - the correction is handed to the
+    executor tagged with MOVE_NUM/CORR_IMG/CORR_OBS
+    (connimgprocess.cpp:243) exactly so it can drop one that no longer
+    matches the current pointing.
     """
     target_ra  = raw_header.get('OBJRA',  raw_header.get('RASC'))
     target_dec = raw_header.get('OBJDEC', raw_header.get('DECL'))
@@ -453,6 +498,16 @@ def main():
         chip_id  = get_camera_id(raw_header)           # physical: andor46, mi6166, …
         ccd_name = raw_header.get('CCD_NAME', chip_id) # RTS2 name: C0, C1, …
 
+    # The live-state outputs are gated on this rather than on args.realtime:
+    # a frame that is not the newest one this camera has produced must not
+    # repaint the web preview or publish its FWHM as the current seeing.
+    # See _is_newest().
+    realtime_now = args.realtime and _is_newest(ccd_name, ctime)
+    if args.realtime and not realtime_now:
+        logger.warning(f"{raw_path.name} is older than the newest frame already "
+                       f"processed for {ccd_name} - skipping web preview and "
+                       f"FWHM report, still reporting astrometry")
+
     pipeline = PhotometryPipeline(
         phdb_root=args.phdb_root,
         png_root=args.png_root,
@@ -506,7 +561,7 @@ def main():
 
         # 2. Web preview — runs in parallel with solve, does not delay corrwerr
         web_thread: Optional[threading.Thread] = None
-        if args.realtime:
+        if realtime_now:
             web_thread = threading.Thread(
                 target=_make_web_image, args=(calibrated, ccd_name), daemon=True,
             )
@@ -523,7 +578,7 @@ def main():
             sys.exit(1)
 
         # 3.5. Report FWHM from phcat catalog to RTS2 (real-time only)
-        if args.realtime:
+        if realtime_now:
             cat_path = temp_dir / fits_file.replace('.fits', '.cat')
             _report_fwhm(cat_path, ccd_name)
 
@@ -542,7 +597,7 @@ def main():
         # joining, this call could see the lock still held and skip, or race
         # step 2's write; joining also guarantees the annotated version is
         # the one left on disk.
-        if args.realtime:
+        if realtime_now:
             if web_thread is not None:
                 web_thread.join(timeout=30)
             _make_web_image(calibrated, ccd_name, annotate=True,
