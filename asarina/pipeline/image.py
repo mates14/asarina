@@ -45,7 +45,9 @@ class ImageProcessor:
                  dophot_enlarge: float = None,
                  dophot_terms: str = None,
                  dophot_idlimit: int = None,
-                 dophot_max_stars: int = 1000):
+                 dophot_max_stars: int = 1000,
+                 dophot_refit_zpn: bool = False,
+                 dophot_astscatt_max: float = 0.5):
         self.temp_grouping = temp_grouping
         self.exposure_tolerance = exposure_tolerance
         self.calib_dir_template = calib_dir_template
@@ -60,6 +62,8 @@ class ImageProcessor:
         self.dophot_terms = dophot_terms
         self.dophot_idlimit = dophot_idlimit
         self.dophot_max_stars = dophot_max_stars
+        self.dophot_refit_zpn = dophot_refit_zpn
+        self.dophot_astscatt_max = dophot_astscatt_max
         self.master_darks = {}
         self.master_flats = {}
         self.objects = []
@@ -491,6 +495,8 @@ class ImageProcessor:
                 dophot_terms=self.dophot_terms,
                 dophot_idlimit=self.dophot_idlimit,
                 dophot_max_stars=self.dophot_max_stars,
+                dophot_refit_zpn=self.dophot_refit_zpn,
+                dophot_astscatt_max=self.dophot_astscatt_max,
             )
 
             with tempfile.TemporaryDirectory() as tmp_str:
@@ -644,6 +650,12 @@ def main():
     phot.add_argument('--dophot-terms', metavar='TERMS')
     phot.add_argument('--dophot-idlimit', type=int, metavar='N')
     phot.add_argument('--dophot-max-stars', type=int, default=1000, metavar='N')
+    phot.add_argument('--refit-zpn', action='store_true',
+                      help='Refit ZPN radial terms (pyrt-dophot -z). Off by '
+                           'default: unstable on a subsampled star list.')
+    phot.add_argument('--astscatt-max', type=float, default=0.5, metavar='PX',
+                      help='Reject solutions with ASTSCATT >= this (px). '
+                           'Default 0.5.')
 
     cfg_grp = parser.add_argument_group('configuration')
     cfg_grp.add_argument('--config', metavar='FILE',
@@ -680,6 +692,8 @@ def main():
             dophot_terms=args.dophot_terms,
             dophot_idlimit=args.dophot_idlimit,
             dophot_max_stars=args.dophot_max_stars,
+            dophot_refit_zpn=args.refit_zpn,
+            dophot_astscatt_max=args.astscatt_max,
         )
         for f in args.files:
             _process_via_pipeline(pipeline, Path(f), output_dir,
@@ -701,6 +715,8 @@ def main():
             dophot_terms=args.dophot_terms,
             dophot_idlimit=args.dophot_idlimit,
             dophot_max_stars=args.dophot_max_stars,
+            dophot_refit_zpn=args.refit_zpn,
+            dophot_astscatt_max=args.astscatt_max,
         )
         processor.load_calibration_frames(args.files)
         processor.process_all_objects(args.output_dir, args.overwrite,

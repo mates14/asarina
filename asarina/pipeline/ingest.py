@@ -41,6 +41,8 @@ class PhotometryPipeline:
                  dophot_terms: str = None,
                  dophot_idlimit: int = None,
                  dophot_max_stars: int = 1000,
+                 dophot_refit_zpn: bool = False,
+                 dophot_astscatt_max: float = 0.5,
                  # Makak-mode bundle
                  makak_mode: bool = False):
 
@@ -68,6 +70,17 @@ class PhotometryPipeline:
         self.dophot_terms = dophot_terms
         self.dophot_idlimit = dophot_idlimit
         self.dophot_max_stars = dophot_max_stars
+        # Refit the ZPN radial projection terms (-z). Off by default: on a
+        # subsampled star list the ZPN refit is under-constrained and can blow
+        # up (e.g. PV2_5 -> -5290), producing a wild astrometric solution.
+        # With it off, the nominal header ZPN is kept and SIP absorbs the
+        # residual distortion.
+        self.dophot_refit_zpn = dophot_refit_zpn
+        # Reject a solution whose astrometric scatter (ASTSCATT, in px) is at or
+        # above this. Guards the photometric DB against badly-astrometrised
+        # frames. Raised from the old hard 0.3 to 0.5: with ZPN refit off and
+        # SIP1, usable frames floor around 0.3 px, so 0.3 rejected good data.
+        self.dophot_astscatt_max = dophot_astscatt_max
 
         # makak_mode enables:
         #   - dark frame detection via slitposx < 0.5
@@ -287,8 +300,14 @@ class PhotometryPipeline:
         # Build pyrt-dophot command
         terms = self.dophot_terms or ".r3,.p3,.l"
         idlimit = self.dophot_idlimit if self.dophot_idlimit is not None else 2
-        dophot_base = ["pyrt-dophot", "-m0.5", "-az", f"-S{sip}",
+        # -a always refits the astrometry (CD + SIP); -z additionally refits
+        # the ZPN radial terms and is only added when explicitly enabled.
+        # -S is set per pass below (raised after the first pass), so it is not
+        # part of the shared base command.
+        dophot_base = ["pyrt-dophot", "-m0.5", "-a",
                        "-U", terms, f"-i{idlimit}"]
+        if self.dophot_refit_zpn:
+            dophot_base.append("-z")
         if self.dophot_max_stars:
             dophot_base += ["--max-stars", str(self.dophot_max_stars)]
         if self.dophot_model:
@@ -305,9 +324,14 @@ class PhotometryPipeline:
         # Photometry + astrometry refit over N passes
         pass_inputs = [det_file] + [ecsv_file] * (passes - 1)
         for pass_num, input_file in enumerate(pass_inputs, start=1):
+            # First pass runs at the requested SIP order (conservative, since it
+            # works off the rough field-solve WCS); later passes raise it to at
+            # least 2 to absorb non-radial distortion the ZPN can't. SIP=0
+            # (explicitly disabled) is left untouched.
+            pass_sip = sip if (pass_num == 1 or sip <= 0) else max(sip, 2)
             t = time.time()
             ret = subprocess.run(
-                dophot_base + [input_file],
+                dophot_base + [f"-S{pass_sip}", input_file],
                 cwd=str(temp_dir), capture_output=True, text=True,
             )
             elapsed = time.time() - t
@@ -337,8 +361,9 @@ class PhotometryPipeline:
         if astscatt is None:
             logger.error("ASTSCATT missing from ECSV — rejecting solution")
             return None
-        if float(astscatt) >= 0.3:
-            logger.error(f"ASTSCATT={float(astscatt):.3f} >= 0.3 — rejecting solution")
+        if float(astscatt) >= self.dophot_astscatt_max:
+            logger.error(f"ASTSCATT={float(astscatt):.3f} >= {self.dophot_astscatt_max} "
+                         "— rejecting solution")
             return None
         if idnum is None or int(idnum) <= 20:
             logger.error(f"IDNUM={idnum} <= 20 — rejecting solution")

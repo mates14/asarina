@@ -85,7 +85,8 @@ def _night_id(unix_time: float):
 
 
 def _copy_wcs_to_raw(calibrated_path: Path, raw_path: Path, chip_id: str,
-                     ecsv_path: Optional[Path] = None) -> bool:
+                     ecsv_path: Optional[Path] = None,
+                     astscatt_max: float = 0.5) -> bool:
     """Copy WCS from calibrated image back into the raw image.
 
     The calibrated image may have been cropped; CRPIX values are adjusted
@@ -125,8 +126,8 @@ def _copy_wcs_to_raw(calibrated_path: Path, raw_path: Path, chip_id: str,
             if astscatt is None:
                 logger.warning("WCS copy skipped: ASTSCATT missing from ECSV")
                 return False
-            if float(astscatt) >= 0.3:
-                logger.warning(f"WCS copy skipped: ASTSCATT={float(astscatt):.3f} >= 0.3")
+            if float(astscatt) >= astscatt_max:
+                logger.warning(f"WCS copy skipped: ASTSCATT={float(astscatt):.3f} >= {astscatt_max}")
                 return False
             if idnum is None or int(idnum) <= 20:
                 logger.warning(f"WCS copy skipped: IDNUM={idnum} <= 20")
@@ -308,7 +309,8 @@ def _make_web_image(calibrated_path: Path, ccd_name: str,
 def _update_archive(raw_path: Path, calibrated_path: Path,
                     ctime: float, chip_id: str, ccd_name: str,
                     ecsv_path: Optional[Path] = None,
-                    archive_root: str = "/images") -> None:
+                    archive_root: str = "/images",
+                    astscatt_max: float = 0.5) -> None:
     """Find the archived raw image and update its header with the final WCS.
 
     ccd_name is the RTS2 camera name used in the archive path (e.g. 'C0').
@@ -327,7 +329,8 @@ def _update_archive(raw_path: Path, calibrated_path: Path,
     if len(candidates) > 1:
         logger.warning(f"Multiple archive candidates, using {archive_path}")
 
-    if _copy_wcs_to_raw(calibrated_path, archive_path, chip_id, ecsv_path):
+    if _copy_wcs_to_raw(calibrated_path, archive_path, chip_id, ecsv_path,
+                        astscatt_max=astscatt_max):
         logger.info(f"Archive header updated: {archive_path}")
 
 
@@ -401,6 +404,12 @@ def main():
     phot.add_argument('--dophot-idlimit', type=int, metavar='N')
     phot.add_argument('--dophot-max-stars', type=int, default=1000, metavar='N',
                       help='Max stars for dophot (0 = no limit; default 1000)')
+    phot.add_argument('--refit-zpn', action='store_true',
+                      help='Refit ZPN radial terms (pyrt-dophot -z). Off by '
+                           'default: unstable on a subsampled star list.')
+    phot.add_argument('--astscatt-max', type=float, default=0.5, metavar='PX',
+                      help='Reject solutions with ASTSCATT >= this (px). '
+                           'Default 0.5.')
     phot.add_argument('--makak', action='store_true',
                       help='Enable Makak-specific features: dark-frame detection, '
                            '55\"/px scale hint, -k in pyrt-dophot, mi0315 crop')
@@ -453,6 +462,8 @@ def main():
         dophot_terms=args.dophot_terms,
         dophot_idlimit=args.dophot_idlimit,
         dophot_max_stars=args.dophot_max_stars,
+        dophot_refit_zpn=args.refit_zpn,
+        dophot_astscatt_max=args.astscatt_max,
         makak_mode=args.makak,
     )
 
