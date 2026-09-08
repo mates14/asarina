@@ -461,6 +461,9 @@ def main():
     phot.add_argument('--dophot-maglim', type=float, metavar='N')
     phot.add_argument('--dophot-enlarge', type=float, metavar='N')
     phot.add_argument('--dophot-terms', metavar='TERMS')
+    phot.add_argument('--dophot-terms-realtime', metavar='TERMS',
+                      help='Cheaper fit prescription to use in --realtime mode '
+                           '(e.g. "&.p3,.l"). Falls back to --dophot-terms when unset.')
     phot.add_argument('--dophot-idlimit', type=int, metavar='N')
     phot.add_argument('--dophot-max-stars', type=int, default=1000, metavar='N',
                       help='Max stars for dophot (0 = no limit; default 1000)')
@@ -509,6 +512,16 @@ def main():
         chip_id  = get_camera_id(raw_header)           # physical: andor46, mi6166, …
         ccd_name = raw_header.get('CCD_NAME', chip_id) # RTS2 name: C0, C1, …
 
+    # Real-time work can run a cheaper fit: the frame is holding one of
+    # imgproc's slots while the night goes on, and a lighter prescription
+    # solves it in less time.  Note this is the fit whose ECSV reaches phdb,
+    # so "cheaper" has to mean "still good enough", not "provisional".
+    terms = args.dophot_terms
+    if args.realtime and args.dophot_terms_realtime:
+        terms = args.dophot_terms_realtime
+        logger.debug(f"realtime fit prescription: {terms!r} "
+                     f"(offline would use {args.dophot_terms!r})")
+
     # The live-state outputs are gated on this rather than on args.realtime:
     # a frame that is not the newest one this camera has produced must not
     # repaint the web preview or publish its FWHM as the current seeing.
@@ -531,7 +544,7 @@ def main():
         dophot_catalog=args.dophot_catalog,
         dophot_maglim=args.dophot_maglim,
         dophot_enlarge=args.dophot_enlarge,
-        dophot_terms=args.dophot_terms,
+        dophot_terms=terms,
         dophot_idlimit=args.dophot_idlimit,
         dophot_max_stars=args.dophot_max_stars,
         dophot_refit_zpn=args.refit_zpn,
