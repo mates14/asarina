@@ -462,8 +462,9 @@ def main():
     phot.add_argument('--dophot-enlarge', type=float, metavar='N')
     phot.add_argument('--dophot-terms', metavar='TERMS')
     phot.add_argument('--dophot-terms-realtime', metavar='TERMS',
-                      help='Cheaper fit prescription to use in --realtime mode '
-                           '(e.g. "&.p3,.l"). Falls back to --dophot-terms when unset.')
+                      help='Fit prescription to use in --realtime mode, normally '
+                           'an "&" form (e.g. "&.p3,.l"). Falls back to '
+                           '--dophot-terms when unset.')
     phot.add_argument('--dophot-idlimit', type=int, metavar='N')
     phot.add_argument('--dophot-max-stars', type=int, default=1000, metavar='N',
                       help='Max stars for dophot (0 = no limit; default 1000)')
@@ -512,10 +513,13 @@ def main():
         chip_id  = get_camera_id(raw_header)           # physical: andor46, mi6166, …
         ccd_name = raw_header.get('CCD_NAME', chip_id) # RTS2 name: C0, C1, …
 
-    # Real-time work can run a cheaper fit: the frame is holding one of
-    # imgproc's slots while the night goes on, and a lighter prescription
-    # solves it in less time.  Note this is the fit whose ECSV reaches phdb,
-    # so "cheaper" has to mean "still good enough", not "provisional".
+    # Real-time work wants an "&" prescription.  The cost in pyrt-dophot is
+    # not the number of terms but the search for them: a bare ".p3,.r3,.l"
+    # runs a stepwise regression to pick the terms, which is what made
+    # real-time slow.  Prefixing "&" says "take them all, don't search" - a
+    # larger but fixed model, no search, a slightly worse fit for a
+    # difference that measures as minimal.  Offline reprocessing can then
+    # re-derive the frame properly with the stepwise form.
     terms = args.dophot_terms
     if args.realtime and args.dophot_terms_realtime:
         terms = args.dophot_terms_realtime
