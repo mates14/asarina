@@ -327,11 +327,16 @@ def _make_web_image(calibrated_path: Path, ccd_name: str,
         info_txt   = web / f"{ccd_name}_info.txt"
 
         # FITS → JPEG  (%H:%M in the label is expanded by f2cj from DATE-OBS)
+        # Long option names on purpose: -i is pyrt-f2cj's --inverted, not an
+        # input flag, and the input file is positional.  The inversion is
+        # wanted here - dark stars on a light sky - but it was being asked
+        # for by accident, and the next person to read this would have
+        # "fixed" it.
         cmd = ["pyrt-f2cj", "--label", f"D50 {ccd_name} - %H:%M",
-               "-o", str(full_jpg), "-i", str(temp_fits)]
+               "--output", str(full_jpg), "--inverted", str(temp_fits)]
         if annotate:
             if catalog_dir:
-                cmd += ["-a", "--catalog-dir", catalog_dir]
+                cmd += ["--annotate", "--catalog-dir", catalog_dir]
             else:
                 logger.debug("web image: annotate requested but no ancat_dir configured, skipping annotation")
         ret = subprocess.run(cmd, capture_output=True)
