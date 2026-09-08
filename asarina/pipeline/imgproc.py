@@ -514,12 +514,15 @@ def main():
         ccd_name = raw_header.get('CCD_NAME', chip_id) # RTS2 name: C0, C1, …
 
     # Real-time work wants an "&" prescription.  The cost in pyrt-dophot is
-    # not the number of terms but the search for them: a bare ".p3,.r3,.l"
-    # runs a stepwise regression to pick the terms, which is what made
-    # real-time slow.  Prefixing "&" says "take them all, don't search" - a
-    # larger but fixed model, no search, a slightly worse fit for a
-    # difference that measures as minimal.  Offline reprocessing can then
-    # re-derive the frame properly with the stepwise form.
+    # not the number of terms but the search for them: unmarked terms go
+    # through a stepwise regression to select within the group, and that is
+    # what made real-time slow.  "&" marks a group direct - take all of it,
+    # no search - for a larger but fixed model and a slightly worse fit,
+    # measured as a minimal difference.  The prefix binds per comma-separated
+    # group (pyrt stepwise_regression.py:185-215), so "&.p3,.l" skips the
+    # search over the polynomial while leaving the RO/RC/RS nonlinearity
+    # group to select as it normally would.  Offline reprocessing can then
+    # re-derive the frame with the fully stepwise form.
     terms = args.dophot_terms
     if args.realtime and args.dophot_terms_realtime:
         terms = args.dophot_terms_realtime
