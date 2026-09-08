@@ -296,13 +296,24 @@ def _make_web_image(calibrated_path: Path, ccd_name: str,
         logger.debug("web image: skipping, lock held by another process")
         return
 
-    if temp_fits.exists() and (now - temp_fits.stat().st_mtime) < 3:
+    # Rate limit on the work, not on the frame.  temp_fits' mtime is the time
+    # of the last preview run - see the copyfile below, which deliberately
+    # does not carry the calibrated file's own mtime across.  The annotated
+    # re-run is exempt: it is the second, final render of a frame already
+    # admitted, and rate-limiting it only leaves the un-annotated version on
+    # disk.  How old the *frame* is, is a different question, and _is_newest()
+    # already answers it from the header.
+    if not annotate and temp_fits.exists() and (now - temp_fits.stat().st_mtime) < 3:
         logger.debug("web image: skipping, cadence limit")
         return
 
     lock_path.touch()
     try:
-        shutil.copy2(str(calibrated_path), str(temp_fits))
+        # copyfile, not copy2: copy2 preserves the source mtime, which turned
+        # the cadence check above into "how long ago was this frame
+        # calibrated" - so a solve finishing inside 3 s silently skipped the
+        # annotated re-render and left the plain preview on the web.
+        shutil.copyfile(str(calibrated_path), str(temp_fits))
 
         # Read dimensions from the calibrated image
         with fits.open(str(temp_fits)) as hdul:
