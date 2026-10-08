@@ -436,7 +436,7 @@ def main():
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Show subprocess output and debug logging')
     parser.add_argument('-r', '--realtime', action='store_true',
-                        help='RTS2 real-time mode: web preview, corrwerr to stdout, WCS written back to raw')
+                        help='RTS2 real-time mode: web preview, FWHM and corrwerr to stdout')
 
     output = parser.add_argument_group('output')
     output.add_argument('--phdb-root', default='/home/mates/phdb',
@@ -618,9 +618,12 @@ def main():
             cat_path = temp_dir / fits_file.replace('.fits', '.cat')
             _report_fwhm(cat_path, ccd_name)
 
-        # 4. Copy WCS into raw image and release it to RTS2 for archiving
-        if args.realtime:
-            _copy_wcs_to_raw(calibrated, raw_path, chip_id)
+        # 4. Copy WCS into raw image and release it to RTS2 for archiving.
+        # Offline too: there raw_path is the archived frame itself (typically
+        # one that landed in bad/ because real-time processing failed), and
+        # this is the only chance to give it a WCS - the archive is root-owned
+        # and privileges are dropped below, before the dophot refinement.
+        _copy_wcs_to_raw(calibrated, raw_path, chip_id)
 
         # 5. Report to RTS2 — corrwerr must be on stdout, nothing else may be
         if args.realtime:
