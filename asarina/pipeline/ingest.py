@@ -42,7 +42,6 @@ class PhotometryPipeline:
                  dophot_idlimit: int = None,
                  dophot_max_stars: int = 1000,
                  dophot_refit_zpn: bool = False,
-                 dophot_astscatt_max: float = 0.5,
                  # Makak-mode bundle
                  makak_mode: bool = False):
 
@@ -76,11 +75,6 @@ class PhotometryPipeline:
         # With it off, the nominal header ZPN is kept and SIP absorbs the
         # residual distortion.
         self.dophot_refit_zpn = dophot_refit_zpn
-        # Reject a solution whose astrometric scatter (ASTSCATT, in px) is at or
-        # above this. Guards the photometric DB against badly-astrometrised
-        # frames. Raised from the old hard 0.3 to 0.5: with ZPN refit off and
-        # SIP1, usable frames floor around 0.3 px, so 0.3 rejected good data.
-        self.dophot_astscatt_max = dophot_astscatt_max
 
         # makak_mode enables:
         #   - dark frame detection via slitposx < 0.5
@@ -325,19 +319,66 @@ class PhotometryPipeline:
         # 2, so a higher request is clamped rather than passed through.
         sip = min(sip, 2)
 
-        # Photometry + astrometry refit over N passes
-        pass_inputs = [det_file] + [ecsv_file] * (passes - 1)
-        for pass_num, input_file in enumerate(pass_inputs, start=1):
-            # The first pass works off the rough field-solve WCS, so it stays
-            # deliberately conservative: the requested SIP order, and never the
-            # ZPN refit - on a subsampled star list that is under-constrained
-            # and runs away (PV2_5 -> -5290 and the like).  Later passes have a
-            # real solution to build on, so SIP escalates to 2 and the ZPN
-            # radial terms are refitted when --refit-zpn asks for it.  An
-            # explicitly disabled SIP (0) is left alone throughout.
-            pass_sip = sip if (pass_num == 1 or sip <= 0) else 2
+        # Photometry + astrometry refit over N passes.  pyrt-dophot judges its
+        # own solution: ASTQUAL=OK or PARTIAL describes the WCS it wrote; a
+        # refused refit leaves the input WCS with that input's own AST* keys,
+        # i.e. no ASTQUAL at all unless the input was itself a verified pass.
+        if not self._dophot_passes(dophot_base, temp_dir, ecsv_file,
+                                   [det_file] + [ecsv_file] * (passes - 1),
+                                   sip, self.dophot_refit_zpn):
+            return None
+        qual = self._astqual(temp_dir / ecsv_file)
+
+        # A partial solution is sane but does not cover the chip: continue
+        # from it - pyrt starts the next refit from the WCS it finds.
+        if qual == 'PARTIAL':
+            logger.warning("Partial astrometric solution, extending it")
+            if not self._dophot_passes(dophot_base, temp_dir, ecsv_file,
+                                       [ecsv_file] * max(1, passes - 1),
+                                       sip, self.dophot_refit_zpn, first_pass=2):
+                return None
+            qual = self._astqual(temp_dir / ecsv_file)
+
+        # No verified solution: start over from the field-solve WCS with the
+        # conservative prescription - no ZPN refit, SIP at most 1.
+        if qual is None:
+            logger.warning("No verified astrometric solution, full rerun without ZPN refit, SIP<=1")
+            if not self._dophot_passes(dophot_base, temp_dir, ecsv_file,
+                                       [det_file] + [ecsv_file] * (passes - 1),
+                                       min(sip, 1), False, sip_max=1):
+                return None
+            qual = self._astqual(temp_dir / ecsv_file)
+
+        if qual != 'OK':
+            logger.error(f"ASTQUAL={qual} — rejecting solution")
+            return None
+
+        from astropy.table import Table
+        meta = Table.read(str(temp_dir / ecsv_file), format='ascii.ecsv').meta
+        idnum = meta.get('IDNUM')
+        if idnum is None or int(idnum) <= 20:
+            logger.error(f"IDNUM={idnum} <= 20 — rejecting solution")
+            return None
+        logger.info(f"Solution quality ok: ASTQUAL={qual} ASTCOVER={meta.get('ASTCOVER')}"
+                    f" ASTSIGMA={meta.get('ASTSIGMA')} IDNUM={idnum}")
+
+        return ecsv_file
+
+    def _dophot_passes(self, dophot_base: List[str], temp_dir: Path, ecsv_file: str,
+                       inputs: List[str], sip: int, refit_zpn: bool,
+                       first_pass: int = 1, sip_max: int = 2) -> bool:
+        """Run pyrt-dophot once per input; False if a pass fails outright.
+
+        The first pass works off the rough field-solve WCS, so it stays
+        deliberately conservative: the requested SIP order, and never the ZPN
+        refit.  Later passes have a real solution to build on, so SIP escalates
+        (to sip_max) and the ZPN radial terms are refitted when refit_zpn asks
+        for it.  An explicitly disabled SIP (0) is left alone throughout.
+        """
+        for pass_num, input_file in enumerate(inputs, start=first_pass):
+            pass_sip = sip if (pass_num == 1 or sip <= 0) else sip_max
             extra = [f"-S{pass_sip}"]
-            if pass_num > 1 and self.dophot_refit_zpn:
+            if pass_num > 1 and refit_zpn:
                 extra.append("-z")
             t = time.time()
             logger.debug(f"pyrt-dophot pass {pass_num} cmd: "
@@ -354,7 +395,7 @@ class PhotometryPipeline:
                 logger.error(f"pyrt-dophot pass {pass_num} failed after {elapsed:.3f}s"
                              + (f"\nstdout:\n{out}" if out else '')
                              + (f"\nstderr:\n{err}" if err else ''))
-                return None
+                return False
             if ret.stdout:
                 logger.debug(f"pyrt-dophot pass {pass_num} stdout:\n{ret.stdout.rstrip()}")
             if ret.stderr:
@@ -363,29 +404,14 @@ class PhotometryPipeline:
 
             if not (temp_dir / ecsv_file).exists():
                 logger.error(f"ECSV {ecsv_file} missing after pyrt-dophot pass {pass_num}")
-                return None
+                return False
+        return True
 
-        # Quality check
+    @staticmethod
+    def _astqual(ecsv_path: Path) -> Optional[str]:
+        """ASTQUAL of the WCS in the ECSV: 'OK', 'PARTIAL', or None if unverified."""
         from astropy.table import Table
-        meta = Table.read(str(temp_dir / ecsv_file), format='ascii.ecsv').meta
-        astscatt = meta.get('ASTSCATT')
-        astwssr  = meta.get('ASTWSSR')
-        idnum    = meta.get('IDNUM')
-        if astscatt is None:
-            logger.error("ASTSCATT missing from ECSV — rejecting solution")
-            return None
-        if float(astscatt) >= self.dophot_astscatt_max:
-            logger.error(f"ASTSCATT={float(astscatt):.3f} >= {self.dophot_astscatt_max} "
-                         "— rejecting solution")
-            return None
-        if idnum is None or int(idnum) <= 20:
-            logger.error(f"IDNUM={idnum} <= 20 — rejecting solution")
-            return None
-        logger.info(f"Solution quality ok: ASTSCATT={float(astscatt):.3f}"
-                    + (f" ASTWSSR={float(astwssr):.1f}" if astwssr is not None else "")
-                    + f" IDNUM={idnum}")
-
-        return ecsv_file
+        return Table.read(str(ecsv_path), format='ascii.ecsv').meta.get('ASTQUAL')
 
     def _write_daily_summary(self, ecsv_filename: str, temp_dir: Path,
                               ctime: float) -> None:

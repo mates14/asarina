@@ -86,14 +86,13 @@ def _night_id(unix_time: float):
 
 
 def _copy_wcs_to_raw(calibrated_path: Path, raw_path: Path, chip_id: str,
-                     ecsv_path: Optional[Path] = None,
-                     astscatt_max: float = 0.5) -> bool:
+                     ecsv_path: Optional[Path] = None) -> bool:
     """Copy WCS from calibrated image back into the raw image.
 
     The calibrated image may have been cropped; CRPIX values are adjusted
     back to raw-image coordinates using the known crop offset.
 
-    ecsv_path, if given, is read for ASTSCATT/ASTWSSR/IDNUM quality checks.
+    ecsv_path, if given, is read for the ASTQUAL/IDNUM quality checks.
     These keywords live in the ECSV metadata, not the FITS header.
     """
     crop = CAMERA_CROPS.get(chip_id)
@@ -117,25 +116,19 @@ def _copy_wcs_to_raw(calibrated_path: Path, raw_path: Path, chip_id: str,
             return False
 
         # Quality check from ECSV metadata (authoritative source).
-        # ASTSCATT and IDNUM (matched-star count) live there, not in the FITS header.
+        # ASTQUAL and IDNUM (matched-star count) live there, not in the FITS header.
         if ecsv_path is not None and ecsv_path.exists():
             from astropy.table import Table
             meta = Table.read(str(ecsv_path), format='ascii.ecsv').meta
-            astscatt = meta.get('ASTSCATT')
-            astwssr  = meta.get('ASTWSSR')
-            idnum    = meta.get('IDNUM')
-            if astscatt is None:
-                logger.warning("WCS copy skipped: ASTSCATT missing from ECSV")
-                return False
-            if float(astscatt) >= astscatt_max:
-                logger.warning(f"WCS copy skipped: ASTSCATT={float(astscatt):.3f} >= {astscatt_max}")
+            astqual = meta.get('ASTQUAL')
+            idnum   = meta.get('IDNUM')
+            if astqual != 'OK':
+                logger.warning(f"WCS copy skipped: ASTQUAL={astqual}")
                 return False
             if idnum is None or int(idnum) <= 20:
                 logger.warning(f"WCS copy skipped: IDNUM={idnum} <= 20")
                 return False
-            logger.debug(f"WCS quality ok: ASTSCATT={float(astscatt):.3f}"
-                         + (f" ASTWSSR={float(astwssr):.1f}" if astwssr is not None else "")
-                         + f" IDNUM={idnum}")
+            logger.debug(f"WCS quality ok: ASTQUAL={astqual} IDNUM={idnum}")
 
         with fits.open(str(raw_path), mode='update') as raw:
             hdr = raw[0].header
@@ -381,8 +374,7 @@ def _make_web_image(calibrated_path: Path, ccd_name: str,
 def _update_archive(raw_path: Path, calibrated_path: Path,
                     ctime: float, chip_id: str, ccd_name: str,
                     ecsv_path: Optional[Path] = None,
-                    archive_root: str = "/images",
-                    astscatt_max: float = 0.5) -> None:
+                    archive_root: str = "/images") -> None:
     """Find the archived raw image and update its header with the final WCS.
 
     ccd_name is the RTS2 camera name used in the archive path (e.g. 'C0').
@@ -401,8 +393,7 @@ def _update_archive(raw_path: Path, calibrated_path: Path,
     if len(candidates) > 1:
         logger.warning(f"Multiple archive candidates, using {archive_path}")
 
-    if _copy_wcs_to_raw(calibrated_path, archive_path, chip_id, ecsv_path,
-                        astscatt_max=astscatt_max):
+    if _copy_wcs_to_raw(calibrated_path, archive_path, chip_id, ecsv_path):
         logger.info(f"Archive header updated: {archive_path}")
 
 
@@ -489,9 +480,6 @@ def main():
                            'second pass on. Off by default, and never applied '
                            'to the first pass: on a subsampled star list the '
                            'refit is under-constrained and runs away.')
-    phot.add_argument('--astscatt-max', type=float, default=0.5, metavar='PX',
-                      help='Reject solutions with ASTSCATT >= this (px). '
-                           'Default 0.5.')
     phot.add_argument('--makak', action='store_true',
                       help='Enable Makak-specific features: dark-frame detection, '
                            '55\"/px scale hint, -k in pyrt-dophot, mi0315 crop')
@@ -571,7 +559,6 @@ def main():
         dophot_idlimit=args.dophot_idlimit,
         dophot_max_stars=args.dophot_max_stars,
         dophot_refit_zpn=args.refit_zpn,
-        dophot_astscatt_max=args.astscatt_max,
         makak_mode=args.makak,
     )
 

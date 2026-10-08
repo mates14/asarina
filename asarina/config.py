@@ -60,8 +60,7 @@ USER_CONFIG_FILE   = '~/.config/asarina/config'
 _BOOL_KEYS  = frozenset({'sbt_window_patch', 'makak', 'refit_zpn'})
 _INT_KEYS   = frozenset({'sip', 'passes', 'dophot_idlimit', 'dophot_max_stars'})
 _FLOAT_KEYS = frozenset({'pixel_scale', 'dophot_maglim', 'dophot_enlarge',
-                          'gain', 'readnoise', 'ape', 'default_fwhm', 'zp_r',
-                          'astscatt_max'})
+                          'gain', 'readnoise', 'ape', 'default_fwhm', 'zp_r'})
 
 
 def _norm(key: str) -> str:
