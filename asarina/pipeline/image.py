@@ -46,7 +46,8 @@ class ImageProcessor:
                  dophot_terms: str = None,
                  dophot_idlimit: int = None,
                  dophot_max_stars: int = 1000,
-                 dophot_refit_zpn: bool = False):
+                 dophot_refit_zpn: bool = False,
+                 dophot_zpn_from_camera: bool = False):
         self.temp_grouping = temp_grouping
         self.exposure_tolerance = exposure_tolerance
         self.calib_dir_template = calib_dir_template
@@ -62,6 +63,7 @@ class ImageProcessor:
         self.dophot_idlimit = dophot_idlimit
         self.dophot_max_stars = dophot_max_stars
         self.dophot_refit_zpn = dophot_refit_zpn
+        self.dophot_zpn_from_camera = dophot_zpn_from_camera
         self.master_darks = {}
         self.master_flats = {}
         self.objects = []
@@ -494,6 +496,7 @@ class ImageProcessor:
                 dophot_idlimit=self.dophot_idlimit,
                 dophot_max_stars=self.dophot_max_stars,
                 dophot_refit_zpn=self.dophot_refit_zpn,
+                dophot_zpn_from_camera=self.dophot_zpn_from_camera,
             )
 
             with tempfile.TemporaryDirectory() as tmp_str:
@@ -652,6 +655,10 @@ def main():
                            'second pass on. Off by default, and never applied '
                            'to the first pass: on a subsampled star list the '
                            'refit is under-constrained and runs away.')
+    phot.add_argument('--zpn-from-camera', action='store_true',
+                      help='First pass uses the camera ZPN model hardcoded in '
+                           'pyrt (pyrt-dophot --zpn-from-camera) instead of the '
+                           'field-solve TAN; cameras without a model ignore it.')
 
     cfg_grp = parser.add_argument_group('configuration')
     cfg_grp.add_argument('--config', metavar='FILE',
@@ -689,6 +696,7 @@ def main():
             dophot_idlimit=args.dophot_idlimit,
             dophot_max_stars=args.dophot_max_stars,
             dophot_refit_zpn=args.refit_zpn,
+            dophot_zpn_from_camera=args.zpn_from_camera,
         )
         for f in args.files:
             _process_via_pipeline(pipeline, Path(f), output_dir,
@@ -711,6 +719,7 @@ def main():
             dophot_idlimit=args.dophot_idlimit,
             dophot_max_stars=args.dophot_max_stars,
             dophot_refit_zpn=args.refit_zpn,
+            dophot_zpn_from_camera=args.zpn_from_camera,
         )
         processor.load_calibration_frames(args.files)
         processor.process_all_objects(args.output_dir, args.overwrite,

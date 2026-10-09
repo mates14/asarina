@@ -480,6 +480,10 @@ def main():
                            'second pass on. Off by default, and never applied '
                            'to the first pass: on a subsampled star list the '
                            'refit is under-constrained and runs away.')
+    phot.add_argument('--zpn-from-camera', action='store_true',
+                      help='First pass uses the camera ZPN model hardcoded in '
+                           'pyrt (pyrt-dophot --zpn-from-camera) instead of the '
+                           'field-solve TAN; cameras without a model ignore it.')
     phot.add_argument('--makak', action='store_true',
                       help='Enable Makak-specific features: dark-frame detection, '
                            '55\"/px scale hint, -k in pyrt-dophot, mi0315 crop')
@@ -559,6 +563,7 @@ def main():
         dophot_idlimit=args.dophot_idlimit,
         dophot_max_stars=args.dophot_max_stars,
         dophot_refit_zpn=args.refit_zpn,
+        dophot_zpn_from_camera=args.zpn_from_camera,
         makak_mode=args.makak,
     )
 

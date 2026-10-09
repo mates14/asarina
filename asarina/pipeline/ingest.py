@@ -42,6 +42,7 @@ class PhotometryPipeline:
                  dophot_idlimit: int = None,
                  dophot_max_stars: int = 1000,
                  dophot_refit_zpn: bool = False,
+                 dophot_zpn_from_camera: bool = False,
                  # Makak-mode bundle
                  makak_mode: bool = False):
 
@@ -75,6 +76,11 @@ class PhotometryPipeline:
         # With it off, the nominal header ZPN is kept and SIP absorbs the
         # residual distortion.
         self.dophot_refit_zpn = dophot_refit_zpn
+        # Start from the camera ZPN model hardcoded in pyrt (CRPIX, PV2_*
+        # held fixed, only CD and CRVAL fitted) instead of the field-solve
+        # TAN, which cannot follow a wide field's distortion and so only
+        # matches stars near its reference point (SBT).
+        self.dophot_zpn_from_camera = dophot_zpn_from_camera
 
         # makak_mode enables:
         #   - dark frame detection via slitposx < 0.5
@@ -369,15 +375,18 @@ class PhotometryPipeline:
                        first_pass: int = 1, sip_max: int = 2) -> bool:
         """Run pyrt-dophot once per input; False if a pass fails outright.
 
-        The first pass works off the rough field-solve WCS, so it stays
-        deliberately conservative: the requested SIP order, and never the ZPN
-        refit.  Later passes have a real solution to build on, so SIP escalates
-        (to sip_max) and the ZPN radial terms are refitted when refit_zpn asks
-        for it.  An explicitly disabled SIP (0) is left alone throughout.
+        The first pass works off the rough field-solve WCS (or, with
+        zpn_from_camera, the fixed camera ZPN model), so it stays deliberately
+        conservative: the requested SIP order, and never the ZPN refit.
+        Later passes have a real solution to build on, so SIP escalates (to
+        sip_max) and the ZPN radial terms are refitted when refit_zpn asks for
+        it.  An explicitly disabled SIP (0) is left alone throughout.
         """
         for pass_num, input_file in enumerate(inputs, start=first_pass):
             pass_sip = sip if (pass_num == 1 or sip <= 0) else sip_max
             extra = [f"-S{pass_sip}"]
+            if pass_num == 1 and self.dophot_zpn_from_camera:
+                extra.append("--zpn-from-camera")
             if pass_num > 1 and refit_zpn:
                 extra.append("-z")
             t = time.time()
