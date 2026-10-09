@@ -415,7 +415,7 @@ def _drop_privileges(username: str) -> None:
 
 def main():
     import argparse
-    from asarina.config import pre_parse, load_config, as_argparse_defaults, SYSTEM_CONFIG_FILE, USER_CONFIG_FILE
+    from asarina.config import pre_parse, load_config, as_argparse_defaults, filter_terms, SYSTEM_CONFIG_FILE, USER_CONFIG_FILE
 
     config_file, camera, remaining = pre_parse()
     cfg = load_config(config_file, camera)
@@ -564,6 +564,7 @@ def main():
         dophot_max_stars=args.dophot_max_stars,
         dophot_refit_zpn=args.refit_zpn,
         dophot_zpn_from_camera=args.zpn_from_camera,
+        dophot_filter_terms=filter_terms(cfg),
         makak_mode=args.makak,
     )
 

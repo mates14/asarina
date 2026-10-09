@@ -43,6 +43,7 @@ class PhotometryPipeline:
                  dophot_max_stars: int = 1000,
                  dophot_refit_zpn: bool = False,
                  dophot_zpn_from_camera: bool = False,
+                 dophot_filter_terms: dict = None,
                  # Makak-mode bundle
                  makak_mode: bool = False):
 
@@ -81,6 +82,9 @@ class PhotometryPipeline:
         # TAN, which cannot follow a wide field's distortion and so only
         # matches stars near its reference point (SBT).
         self.dophot_zpn_from_camera = dophot_zpn_from_camera
+        # Extra terms per filter (config filter_terms_<f>), appended to the
+        # -U prescription - e.g. fixed colour terms of an unfiltered camera.
+        self.dophot_filter_terms = dophot_filter_terms or {}
 
         # makak_mode enables:
         #   - dark frame detection via slitposx < 0.5
@@ -282,6 +286,8 @@ class PhotometryPipeline:
         """
         det_file  = fits_file.replace('.fits', '.det')
         ecsv_file = fits_file.replace('.fits', '.ecsv')
+        from astropy.io import fits
+        fltr = str(fits.getval(str(temp_dir / fits_file), 'FILTER', default='')).lower()
 
         # Catalog → detection matching
         t = time.time()
@@ -303,6 +309,9 @@ class PhotometryPipeline:
         # chips need the .l linearity term, D50's do not and prefer the "&"
         # speed forms - so this default only ever covers a bare invocation.
         terms = self.dophot_terms or ".r3,.p3,.l"
+        if fltr in self.dophot_filter_terms:
+            terms += "," + self.dophot_filter_terms[fltr]
+            logger.info(f"Filter {fltr}: dophot terms {terms}")
         idlimit = self.dophot_idlimit if self.dophot_idlimit is not None else 2
         # -a always refits the astrometry (CD + SIP).  -S and -z are not here:
         # both escalate per pass, and neither is applied to the first one.

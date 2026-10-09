@@ -47,7 +47,8 @@ class ImageProcessor:
                  dophot_idlimit: int = None,
                  dophot_max_stars: int = 1000,
                  dophot_refit_zpn: bool = False,
-                 dophot_zpn_from_camera: bool = False):
+                 dophot_zpn_from_camera: bool = False,
+                 dophot_filter_terms: dict = None):
         self.temp_grouping = temp_grouping
         self.exposure_tolerance = exposure_tolerance
         self.calib_dir_template = calib_dir_template
@@ -64,6 +65,7 @@ class ImageProcessor:
         self.dophot_max_stars = dophot_max_stars
         self.dophot_refit_zpn = dophot_refit_zpn
         self.dophot_zpn_from_camera = dophot_zpn_from_camera
+        self.dophot_filter_terms = dophot_filter_terms
         self.master_darks = {}
         self.master_flats = {}
         self.objects = []
@@ -497,6 +499,7 @@ class ImageProcessor:
                 dophot_max_stars=self.dophot_max_stars,
                 dophot_refit_zpn=self.dophot_refit_zpn,
                 dophot_zpn_from_camera=self.dophot_zpn_from_camera,
+                dophot_filter_terms=self.dophot_filter_terms,
             )
 
             with tempfile.TemporaryDirectory() as tmp_str:
@@ -603,7 +606,7 @@ def _process_via_pipeline(pipeline, image_path: Path, output_dir: Path,
 
 def main():
     """Command line interface."""
-    from asarina.config import pre_parse, load_config, as_argparse_defaults, SYSTEM_CONFIG_FILE, USER_CONFIG_FILE
+    from asarina.config import pre_parse, load_config, as_argparse_defaults, filter_terms, SYSTEM_CONFIG_FILE, USER_CONFIG_FILE
 
     config_file, camera, remaining = pre_parse()
     cfg = load_config(config_file, camera)
@@ -697,6 +700,7 @@ def main():
             dophot_max_stars=args.dophot_max_stars,
             dophot_refit_zpn=args.refit_zpn,
             dophot_zpn_from_camera=args.zpn_from_camera,
+            dophot_filter_terms=filter_terms(cfg),
         )
         for f in args.files:
             _process_via_pipeline(pipeline, Path(f), output_dir,
@@ -720,6 +724,7 @@ def main():
             dophot_max_stars=args.dophot_max_stars,
             dophot_refit_zpn=args.refit_zpn,
             dophot_zpn_from_camera=args.zpn_from_camera,
+            dophot_filter_terms=filter_terms(cfg),
         )
         processor.load_calibration_frames(args.files)
         processor.process_all_objects(args.output_dir, args.overwrite,

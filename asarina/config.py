@@ -27,6 +27,9 @@ Recognised keys (underscores or dashes interchangeable):
   model_file        str
   ssh_key           str
   ancat_dir         str    (local sky-catalog dir for web-preview annotation)
+  filter_terms_<f>  str    appended verbatim to the dophot terms (-U) when the
+                           FITS FILTER is <f> (case-insensitive), e.g.
+                           filter_terms_clear = #PC=-0.352,#P2C=0.077
 
 Example /etc/asarina/config:
   [C2]
@@ -155,6 +158,12 @@ def pre_parse(argv=None):
                     break
 
     return conf_args.config, camera, remaining
+
+
+def filter_terms(config: dict) -> dict:
+    """{filter (lower case): extra dophot terms} from the filter_terms_<f> keys."""
+    return {k[len('filter_terms_'):]: v for k, v in config.items()
+            if k.startswith('filter_terms_') and v}
 
 
 def as_argparse_defaults(config: dict) -> dict:
