@@ -42,7 +42,7 @@ from astropy.wcs import WCS, FITSFixedWarning
 warnings.filterwarnings('ignore', category=FITSFixedWarning)
 
 from asarina.pipeline.ingest import PhotometryPipeline
-from asarina.pipeline.pipeline_utils import TransientSearcher, DatabaseUploader
+from asarina.pipeline.pipeline_utils import TransientSearcher, DatabaseUploader, db_gate
 from asarina.pipeline.image import CAMERA_CROPS
 from asarina.pipeline.patch_window import compute_keywords, KNOWN_WINDOW_SIZES
 from asarina.chip_id import get_camera_id
@@ -681,7 +681,12 @@ def main():
 
         # 8. Upload ECSV to database server
         if ecsv_path is not None and args.ssh_key is not None:
-            DatabaseUploader(ssh_key=args.ssh_key).upload_ecsv(ecsv_path)
+            from astropy.table import Table
+            reason = db_gate(Table.read(str(ecsv_path), format='ascii.ecsv').meta, cfg)
+            if reason:
+                logger.warning(f"Not uploading {Path(ecsv_path).name} to the photometric database: {reason}")
+            else:
+                DatabaseUploader(ssh_key=args.ssh_key).upload_ecsv(ecsv_path)
 
         # 9. Notify transient daemon (as mates, so fnovotny can read the files)
         if ecsv_path is not None:

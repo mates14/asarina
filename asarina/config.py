@@ -30,6 +30,10 @@ Recognised keys (underscores or dashes interchangeable):
   filter_terms_<f>  str    appended verbatim to the dophot terms (-U) when the
                            FITS FILTER is <f> (case-insensitive), e.g.
                            filter_terms_clear = #PC=-0.352,#P2C=0.077
+  db_astqual        str    OK,PARTIAL  ASTQUAL values uploaded to the photometric DB
+  db_phqual         str    OK          PHQUAL values uploaded (ECSVs without PHQUAL pass)
+  db_max_fwhm       float              no upload above this FWHM in px (trailing, defocus)
+  db_min_idnum      int    50          no upload with fewer matched stars
 
 Example /etc/asarina/config:
   [C2]
@@ -61,9 +65,9 @@ USER_CONFIG_FILE   = '~/.config/asarina/config'
 # comparison; for a bool it is worse and silent, since "false" is a non-empty
 # string and therefore true.  Add new typed options here as they appear.
 _BOOL_KEYS  = frozenset({'sbt_window_patch', 'makak', 'refit_zpn', 'zpn_from_camera'})
-_INT_KEYS   = frozenset({'sip', 'passes', 'dophot_idlimit', 'dophot_max_stars'})
+_INT_KEYS   = frozenset({'sip', 'passes', 'dophot_idlimit', 'dophot_max_stars', 'db_min_idnum'})
 _FLOAT_KEYS = frozenset({'pixel_scale', 'dophot_maglim', 'dophot_enlarge',
-                          'gain', 'readnoise', 'ape', 'default_fwhm', 'zp_r'})
+                          'gain', 'readnoise', 'ape', 'default_fwhm', 'zp_r', 'db_max_fwhm'})
 
 
 def _norm(key: str) -> str:

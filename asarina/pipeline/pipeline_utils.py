@@ -131,6 +131,40 @@ class PngCleaner:
             self.logger.warning(f"Error cleaning empty directories: {e}")
 
 
+def db_gate(meta: dict, cfg: dict):
+    """Reason why an ECSV must not go to the photometric database, or None.
+
+    Only per-frame quality flags written by pyrt-dophot count; a uniform loss of
+    light (thin haze) is no reason, it is absorbed by the zero point.  Config keys
+    (any section, see asarina.config):
+      db_astqual    allowed ASTQUAL values, comma-separated (default OK,PARTIAL);
+                    an ECSV without ASTQUAL carries an unverified WCS
+      db_phqual     allowed PHQUAL values (default OK); ECSVs older than PHQUAL pass
+      db_max_fwhm   largest FWHM in px (default none): trailed or defocused frames
+      db_min_idnum  fewest matched stars (default 50)
+    DMAGZERO is deliberately not used: it is the marginal error of the Z term and
+    blows up when Z correlates with other terms, also on good frames.
+    """
+    allowed = [v.strip().upper() for v in (cfg.get('db_astqual') or 'OK,PARTIAL').split(',')]
+    astqual = str(meta.get('ASTQUAL', 'NONE')).upper()
+    if astqual not in allowed:
+        return f"ASTQUAL={astqual} (allowed {','.join(allowed)})"
+    allowed = [v.strip().upper() for v in (cfg.get('db_phqual') or 'OK').split(',')]
+    phqual = meta.get('PHQUAL')
+    if phqual is not None and str(phqual).upper() not in allowed:
+        return f"PHQUAL={phqual} ({meta.get('PHQREAS', '')})"
+    max_fwhm = cfg.get('db_max_fwhm')
+    fwhm = meta.get('FWHM')
+    if max_fwhm is not None and fwhm is not None and not float(fwhm) <= max_fwhm:
+        return f"FWHM={float(fwhm):.1f}px > {max_fwhm}"
+    min_idnum = cfg.get('db_min_idnum')
+    min_idnum = 50 if min_idnum is None else min_idnum
+    idnum = meta.get('IDNUM')
+    if idnum is not None and int(idnum) < min_idnum:
+        return f"IDNUM={idnum} < {min_idnum}"
+    return None
+
+
 class DatabaseUploader:
     """Upload ECSV files to the remote photometry database."""
 
