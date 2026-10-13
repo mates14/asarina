@@ -475,6 +475,10 @@ def main():
     phot.add_argument('--dophot-idlimit', type=int, metavar='N')
     phot.add_argument('--dophot-max-stars', type=int, default=1000, metavar='N',
                       help='Max stars for dophot (0 = no limit; default 1000)')
+    phot.add_argument('--dophot-workers', type=int, metavar='N',
+                      help='Processes for the pyrt-dophot stepwise term search '
+                           '(default: one per CPU). Batch reprocessing that runs '
+                           'one frame per core wants 1.')
     phot.add_argument('--refit-zpn', action='store_true',
                       help='Refit ZPN radial terms (pyrt-dophot -z) from the '
                            'second pass on. Off by default, and never applied '
@@ -562,6 +566,7 @@ def main():
         dophot_terms=terms,
         dophot_idlimit=args.dophot_idlimit,
         dophot_max_stars=args.dophot_max_stars,
+        dophot_workers=args.dophot_workers,
         dophot_refit_zpn=args.refit_zpn,
         dophot_zpn_from_camera=args.zpn_from_camera,
         dophot_filter_terms=filter_terms(cfg),

@@ -41,6 +41,7 @@ class PhotometryPipeline:
                  dophot_terms: str = None,
                  dophot_idlimit: int = None,
                  dophot_max_stars: int = 1000,
+                 dophot_workers: int = None,
                  dophot_refit_zpn: bool = False,
                  dophot_zpn_from_camera: bool = False,
                  dophot_filter_terms: dict = None,
@@ -71,6 +72,10 @@ class PhotometryPipeline:
         self.dophot_terms = dophot_terms
         self.dophot_idlimit = dophot_idlimit
         self.dophot_max_stars = dophot_max_stars
+        # Processes for pyrt-dophot's stepwise term search (--workers).  None
+        # leaves pyrt's default, one per CPU, which suits a single real-time
+        # frame; a batch run with one frame per core wants 1.
+        self.dophot_workers = dophot_workers
         # Refit the ZPN radial projection terms (-z). Off by default: on a
         # subsampled star list the ZPN refit is under-constrained and can blow
         # up (e.g. PV2_5 -> -5290), producing a wild astrometric solution.
@@ -319,6 +324,8 @@ class PhotometryPipeline:
                        "-U", terms, f"-i{idlimit}"]
         if self.dophot_max_stars:
             dophot_base += ["--max-stars", str(self.dophot_max_stars)]
+        if self.dophot_workers:
+            dophot_base += ["--workers", str(self.dophot_workers)]
         if self.dophot_model:
             dophot_base += ["-M", self.dophot_model]
         if self.dophot_catalog:

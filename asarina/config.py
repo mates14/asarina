@@ -22,6 +22,7 @@ Recognised keys (underscores or dashes interchangeable):
   dophot_terms      str
   dophot_idlimit    int
   dophot_max_stars  int    1000
+  dophot_workers    int           pyrt-dophot --workers (default: one per CPU)
   smart_dark        str
   stat_dir          str
   model_file        str
@@ -65,7 +66,8 @@ USER_CONFIG_FILE   = '~/.config/asarina/config'
 # comparison; for a bool it is worse and silent, since "false" is a non-empty
 # string and therefore true.  Add new typed options here as they appear.
 _BOOL_KEYS  = frozenset({'sbt_window_patch', 'makak', 'refit_zpn', 'zpn_from_camera'})
-_INT_KEYS   = frozenset({'sip', 'passes', 'dophot_idlimit', 'dophot_max_stars', 'db_min_idnum'})
+_INT_KEYS   = frozenset({'sip', 'passes', 'dophot_idlimit', 'dophot_max_stars', 'dophot_workers',
+                         'db_min_idnum'})
 _FLOAT_KEYS = frozenset({'pixel_scale', 'dophot_maglim', 'dophot_enlarge',
                           'gain', 'readnoise', 'ape', 'default_fwhm', 'zp_r', 'db_max_fwhm'})
 
