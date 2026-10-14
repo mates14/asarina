@@ -1592,8 +1592,17 @@ def run_mixflat(output: str, input_files: list) -> bool:
     return os.path.exists(output)
 
 
+def spread_subset(files: list, n: int) -> list:
+    """At most n of files, evenly spaced in time (archive names start with the
+    timestamp), so a capped master still samples the whole year."""
+    if not n or len(files) <= n:
+        return files
+    ordered = sorted(files, key=lambda f: Path(f).name)
+    return [ordered[i * len(ordered) // n] for i in range(n)]
+
+
 def create_master_darks(dark_groups: dict, output_dir: Path, validate: bool = True,
-                        dry_run: bool = False) -> dict:
+                        dry_run: bool = False, max_darks: int = None) -> dict:
     """Create master dark frames from grouped darks."""
     master_darks = {}
 
@@ -1633,6 +1642,12 @@ def create_master_darks(dark_groups: dict, output_dir: Path, validate: bool = Tr
         if len(valid_files) < 2:
             log(f"Not enough valid darks for {output_name}", "warn")
             continue
+
+        # Past a few hundred frames a master's noise is far below the read
+        # noise, while the combine (staging ~3x the input) only gets slower.
+        if max_darks and len(valid_files) > max_darks:
+            log(f"Using {max_darks} of {len(valid_files)} valid darks, spread over the year", "info")
+            valid_files = spread_subset(valid_files, max_darks)
 
         log(f"Creating {output_name} from {len(valid_files)} frames", "info")
 
@@ -1761,8 +1776,9 @@ def create_master_flats(flat_groups: dict, master_darks: dict, output_dir: Path,
             log(f"  [DRY-RUN] Would combine flats with their darks", "info")
             continue
 
-        # Create temporary dark-subtracted flats (use ~/tmp for space)
-        user_tmp = Path.home() / "tmp"
+        # Create temporary dark-subtracted flats on a large local disk:
+        # ASARINA_TMP if set, else ~/tmp (see iraf_combine_dark.sh)
+        user_tmp = Path(os.environ.get("ASARINA_TMP") or Path.home() / "tmp")
         user_tmp.mkdir(exist_ok=True)
         temp_dir = Path(tempfile.mkdtemp(prefix="calib_", dir=user_tmp))
         temp_files = []
@@ -1950,7 +1966,7 @@ def process_calibrations(config: CalibConfig, year: str, camera: Optional[str] =
                          output_base: Optional[str] = None, validate_darks: bool = True,
                          dry_run: bool = False, skip_flats: bool = False,
                          n_workers: int = None, stats_only: bool = False,
-                         layout: str = "auto"):
+                         layout: str = "auto", max_darks: int = None):
     """Process calibration frames.
 
     Find ALL files in archive, group by physical camera_id,
@@ -2049,7 +2065,8 @@ def process_calibrations(config: CalibConfig, year: str, camera: Optional[str] =
 
             # Create master darks
             master_darks = create_master_darks(dark_groups, final_output,
-                                               validate=validate_darks, dry_run=dry_run)
+                                               validate=validate_darks, dry_run=dry_run,
+                                               max_darks=max_darks)
             log(f"Created {len(master_darks)} master darks", "info")
         else:
             master_darks = {}
@@ -2159,6 +2176,9 @@ Examples:
                         help="Show what would be done without actually doing it")
     parser.add_argument("--no-validate", action="store_true",
                         help="Skip dark validation (use all darks)")
+    parser.add_argument("--max-darks", type=int, default=400, metavar="N",
+                        help="Combine at most N validated darks per master, evenly "
+                             "spread over the year (default: 400; 0 = all)")
     parser.add_argument("--skip-flats", action="store_true",
                         help="Only process darks, skip flats")
     parser.add_argument("--list-years", action="store_true",
@@ -2273,6 +2293,7 @@ Examples:
         n_workers=args.workers,
         stats_only=args.stats_only,
         layout=args.layout,
+        max_darks=args.max_darks,
     )
 
     log("\nDone!", "info")
