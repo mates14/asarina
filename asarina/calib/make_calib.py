@@ -567,9 +567,15 @@ CAMERA_NOISE_MODELS = {
     },
     # SBT cameras
     "mi6166": {  # Moravian G4-16000 Kodak KAF-16803 (SBT C1)
-        # sigma = sqrt(10.02² + 0.045 * exptime), from fit to noise-mi6166.out
-        "1x1": lambda exp, temp: (math.sqrt(10.02**2 + 0.045 * exp), 0.15),
-        "2x2": lambda exp, temp: (math.sqrt(10.02**2 + 0.045 * exp), 0.15),  # TODO: verify 2x2
+        # sigma = sqrt(10.62² + 0.042 * exptime), from the clean groups (2-12 s,
+        # 60 s, 180 s) of the 2026 --measure-noise run; the floor was 10.02.
+        # The odd 13-28 s exposures are flat darks, taken next to the flats and
+        # probably carrying RBI: they climb to ~11.3 with exposure time. They
+        # must still pass - a little light in a flat dark does no harm - so the
+        # tolerance is wide; it only has to catch damaged darks (light leak,
+        # shutter not closed), which land far above.
+        "1x1": lambda exp, temp: (math.sqrt(10.62**2 + 0.042 * exp), 0.5),
+        "2x2": lambda exp, temp: (math.sqrt(10.62**2 + 0.042 * exp), 0.5),  # TODO: verify 2x2
     },
     # Mobile backup cameras
     "mi2066": {  # Moravian G2-1600 Kodak KAF-1603
