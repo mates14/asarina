@@ -32,8 +32,11 @@ if [ $N -eq 0 ]; then
     exit 1
 fi
 
-# Create temp directory (use ~/tmp for space)
-user_tmp="$HOME/tmp"
+# Create temp directory.  A chunk stages ~3x its input size (copies, surface
+# fits, residuals), so this needs a large local disk: ASARINA_TMP if set
+# (e.g. /tmp on a host whose home is NFS), else ~/tmp (lascaux: /tmp is a
+# small tmpfs, home is local).
+user_tmp="${ASARINA_TMP:-$HOME/tmp}"
 mkdir -p "$user_tmp"
 tempdir=$(mktemp -d "$user_tmp/iraf_dark.XXXXXX")
 trap "rm -rf $tempdir" EXIT
@@ -84,7 +87,7 @@ imarith @files.lst - @files.lst//-f @files.lst//-r
 imcombine @files.lst//-r res.fits combine=average reject=minmax nlow='$nrej' nhigh='$nrej'
 imarith ave.fits + res.fits result.fits
 logout
-' | timeout -s KILL 1200 $IRAF_CL
+' | timeout -s KILL 3600 $IRAF_CL
 
 # Kill any orphaned IRAF processes from this script
 pkill -9 -P $$ ecl.e 2>/dev/null || true

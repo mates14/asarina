@@ -73,7 +73,7 @@ def combine_chunk(chunk_files: list[str], output_path: str, chunk_id: int) -> tu
             cmd,
             capture_output=True,
             text=True,
-            timeout=3600  # 1 hour timeout per chunk
+            timeout=7200  # per chunk: staging + IRAF (itself capped at 1 h)
         )
 
         if result.returncode != 0:
@@ -164,7 +164,8 @@ def main():
 
     # Multiple chunks: process in parallel, then combine
     # Use ~/tmp for space (system /tmp and /var/tmp may be too small)
-    user_tmp = Path.home() / "tmp"
+    # ASARINA_TMP: see iraf_combine_dark.sh - a large local disk, ~/tmp by default
+    user_tmp = Path(os.environ.get("ASARINA_TMP") or Path.home() / "tmp")
     user_tmp.mkdir(exist_ok=True)
     tempdir = tempfile.mkdtemp(prefix="mixflat_", dir=user_tmp)
     try:

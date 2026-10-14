@@ -25,7 +25,7 @@ import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-MAX_WORKERS = 16
+MAX_WORKERS = 4    # parallel chunks: each stages ~30 GB for a 4k chip, and IRAF is I/O bound
 MAX_FRAMES_PER_CHUNK = 150
 SCRIPT_DIR = Path(__file__).parent.resolve()
 IRAF_SCRIPT = SCRIPT_DIR / "iraf_combine_dark.sh"
@@ -74,7 +74,7 @@ def combine_chunk(chunk_files: list[str], output_path: str, chunk_id: int) -> tu
             cmd,
             capture_output=True,
             text=True,
-            timeout=3600  # 1 hour timeout per chunk
+            timeout=7200  # per chunk: staging + IRAF (itself capped at 1 h)
         )
 
         if result.returncode != 0:
@@ -165,7 +165,8 @@ def main():
 
     # Multiple chunks: process in parallel, then combine
     # Use ~/tmp for space (system /tmp and /var/tmp may be too small)
-    user_tmp = Path.home() / "tmp"
+    # ASARINA_TMP: see iraf_combine_dark.sh - a large local disk, ~/tmp by default
+    user_tmp = Path(os.environ.get("ASARINA_TMP") or Path.home() / "tmp")
     user_tmp.mkdir(exist_ok=True)
     tempdir = tempfile.mkdtemp(prefix="mixdark_", dir=user_tmp)
     try:
