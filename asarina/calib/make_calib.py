@@ -686,7 +686,10 @@ def log(msg: str, level: str = "info"):
     if level == "debug" and not VERBOSE:
         return
     prefix = {"info": "[INFO]", "warn": "[WARN]", "error": "[ERROR]", "debug": "[DEBUG]"}
-    print(f"{prefix.get(level, '[INFO]')} {msg}")
+    # flush: through "| tee" stdout is a pipe and block-buffered, so lines would
+    # otherwise only surface with the next progress bar - long silent steps
+    # (mixdark, flat dark-subtraction) then look like a hang
+    print(f"{prefix.get(level, '[INFO]')} {msg}", flush=True)
 
 
 def progress_bar(current: int, total: int, width: int = 40, prefix: str = ""):
@@ -1809,6 +1812,7 @@ def create_master_flats(flat_groups: dict, master_darks: dict, output_dir: Path,
                 temp_file = temp_dir / f"temp_flat_{i:03d}.fits"
                 if subtract_dark(flat, dark, str(temp_file)):
                     temp_files.append(str(temp_file))
+                progress_bar(i + 1, len(flats_with_darks), prefix="    dark-subtracting: ")
 
             if len(temp_files) >= 1:
                 if run_mixflat(str(output_path), temp_files):
