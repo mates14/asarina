@@ -577,6 +577,21 @@ CAMERA_NOISE_MODELS = {
         "1x1": lambda exp, temp: (math.sqrt(10.62**2 + 0.042 * exp), 0.5),
         "2x2": lambda exp, temp: (math.sqrt(10.62**2 + 0.042 * exp), 0.5),  # TODO: verify 2x2
     },
+    "mi6167": {  # Moravian G4-16000 Kodak KAF-16803 (SBT C2)
+        # sigma = sqrt(8.72² + 0.030 * exptime), from the clean groups (1 s,
+        # 29/30 s, 60 s, 120 s) of the 2026 --measure-noise run. Until now C2
+        # fell back to DEFAULT_NOISE_MODEL (8.0 +- 0.5), whose 9.0 ceiling
+        # rejected most of its darks. The flat darks (2-28 s) run up to 9.5
+        # and must pass, as for mi6166.
+        "1x1": lambda exp, temp: (math.sqrt(8.72**2 + 0.030 * exp), 0.4),
+        "2x2": lambda exp, temp: (math.sqrt(8.72**2 + 0.030 * exp), 0.4),  # TODO: verify 2x2
+    },
+    "mi0206": {  # Moravian, 1536x1024 (SBT)
+        # Flat 8.74-8.90 over 1-120 s in the 2026 --measure-noise run, no
+        # dark-current trend; until now it fell back to DEFAULT (8.0 +- 0.5).
+        "1x1": lambda exp, temp: (8.82, 0.25),
+        "2x2": lambda exp, temp: (8.82, 0.25),  # TODO: verify 2x2
+    },
     # Mobile backup cameras
     "mi2066": {  # Moravian G2-1600 Kodak KAF-1603
         "1x1": lambda exp, temp: (9.8 - 0.4, 0.2),
