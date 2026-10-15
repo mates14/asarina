@@ -1616,12 +1616,13 @@ def run_mixflat(output: str, input_files: list) -> bool:
     return os.path.exists(output)
 
 
-def spread_subset(files: list, n: int) -> list:
+def spread_subset(files: list, n: int, path=lambda f: f) -> list:
     """At most n of files, evenly spaced in time (archive names start with the
-    timestamp), so a capped master still samples the whole year."""
+    timestamp), so a capped master still samples the whole year.  path()
+    picks the file name out of each item when they are not plain paths."""
     if not n or len(files) <= n:
         return files
-    ordered = sorted(files, key=lambda f: Path(f).name)
+    ordered = sorted(files, key=lambda f: Path(path(f)).name)
     return [ordered[i * len(ordered) // n] for i in range(n)]
 
 
@@ -1760,7 +1761,7 @@ def subtract_dark(flat_file: str, dark_file: str, output_file: str) -> bool:
 
 
 def create_master_flats(flat_groups: dict, master_darks: dict, output_dir: Path,
-                        dry_run: bool = False) -> dict:
+                        dry_run: bool = False, max_flats: int = None) -> dict:
     """Create master flat frames from grouped flats."""
     master_flats = {}
 
@@ -1793,6 +1794,13 @@ def create_master_flats(flat_groups: dict, master_darks: dict, output_dir: Path,
         if not flats_with_darks:
             log(f"No flats with matching darks for {output_name}", "warn")
             continue
+
+        # Every flat is dark-subtracted into a temp file before the combine
+        # (68 MB each on a 4k chip), so ~2000 flats per filter filled a 195 GB
+        # disk. A few hundred, spread over the year, still reject the stars.
+        if max_flats and len(flats_with_darks) > max_flats:
+            log(f"Using {max_flats} of {len(flats_with_darks)} flats, spread over the year", "info")
+            flats_with_darks = spread_subset(flats_with_darks, max_flats, path=lambda fd: fd[0])
 
         log(f"Creating {output_name} from {len(flats_with_darks)} frames", "info")
 
@@ -1991,7 +1999,8 @@ def process_calibrations(config: CalibConfig, year: str, camera: Optional[str] =
                          output_base: Optional[str] = None, validate_darks: bool = True,
                          dry_run: bool = False, skip_flats: bool = False,
                          n_workers: int = None, stats_only: bool = False,
-                         layout: str = "auto", max_darks: int = None):
+                         layout: str = "auto", max_darks: int = None,
+                         max_flats: int = None):
     """Process calibration frames.
 
     Find ALL files in archive, group by physical camera_id,
@@ -2115,7 +2124,7 @@ def process_calibrations(config: CalibConfig, year: str, camera: Optional[str] =
 
             # Create master flats
             master_flats = create_master_flats(flat_groups, master_darks, final_output,
-                                               dry_run=dry_run)
+                                               dry_run=dry_run, max_flats=max_flats)
             log(f"Created {len(master_flats)} master flats", "info")
         elif not master_darks:
             log("Skipping flats - no master darks available", "warn")
@@ -2204,6 +2213,10 @@ Examples:
     parser.add_argument("--max-darks", type=int, default=400, metavar="N",
                         help="Combine at most N validated darks per master, evenly "
                              "spread over the year (default: 400; 0 = all)")
+    parser.add_argument("--max-flats", type=int, default=600, metavar="N",
+                        help="Combine at most N flats per filter, evenly spread over "
+                             "the year (default: 600; 0 = all). Each is staged "
+                             "dark-subtracted, ~68 MB on a 4k chip")
     parser.add_argument("--skip-flats", action="store_true",
                         help="Only process darks, skip flats")
     parser.add_argument("--list-years", action="store_true",
@@ -2319,6 +2332,7 @@ Examples:
         stats_only=args.stats_only,
         layout=args.layout,
         max_darks=args.max_darks,
+        max_flats=args.max_flats,
     )
 
     log("\nDone!", "info")
