@@ -16,7 +16,7 @@ Sequence:
   6. dophot photometry pass
   7. save ECSV/PNG results
   8. upload ECSV to database server
-  9. notify transient daemon
+  9. notify transient daemon (real-time only)
   10. locate archived raw by night/camera/filename, update its header
 """
 
@@ -693,8 +693,9 @@ def main():
             else:
                 DatabaseUploader(ssh_key=args.ssh_key).upload_ecsv(ecsv_path)
 
-        # 9. Notify transient daemon (as mates, so fnovotny can read the files)
-        if ecsv_path is not None:
+        # 9. Notify transient daemon (as mates, so fnovotny can read the files).
+        # Real-time only: an offline batch would feed it the whole archive.
+        if ecsv_path is not None and args.realtime:
             dft = temp_dir / fits_file.replace('df.fits', 'dft.fits')
             fits_for_transients = str(dft) if dft.exists() else str(calibrated)
             TransientSearcher().search_transients(ecsv_path, fits_for_transients)
