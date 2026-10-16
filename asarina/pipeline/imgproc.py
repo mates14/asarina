@@ -502,9 +502,12 @@ def main():
     parser.set_defaults(**defaults)
     args = parser.parse_args(remaining)
 
+    # Tag every line with the frame (e.g. 20260210173514-861): parallel batch
+    # runs append to one log file, and untagged lines cannot be told apart.
+    frame_tag = Path(args.fits_file).name.split('-RA')[0].split('.fits')[0]
     logging.basicConfig(
         stream=sys.stderr,
-        format='%(asctime)s %(levelname)s: %(message)s',
+        format=f'%(asctime)s [{frame_tag}] %(levelname)s: %(message)s',
         datefmt='%H:%M:%S',
     )
     logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.INFO)
