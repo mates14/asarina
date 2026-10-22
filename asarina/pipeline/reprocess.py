@@ -316,7 +316,7 @@ class Reprocessor:
         env = dict(os.environ, TERM=os.environ.get('TERM', 'xterm'), DISPLAY='', LANG='C',
                    OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1', MKL_NUM_THREADS='1')
         env.pop('RTS2_STAT_DIR', None)
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, env=env, start_new_session=True)
         with self.lock:
             self.children[path] = proc
