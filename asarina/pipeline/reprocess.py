@@ -311,7 +311,10 @@ class Reprocessor:
         if a.config:
             cmd += ['--config', a.config]
         cmd += a.args + [path]
-        env = dict(os.environ, TERM=os.environ.get('TERM', 'xterm'), DISPLAY='', LANG='C')
+        # One frame per core: numpy's BLAS must not start a thread per core in
+        # each of them (load 78 on hog's 24 cores with 16 workers).
+        env = dict(os.environ, TERM=os.environ.get('TERM', 'xterm'), DISPLAY='', LANG='C',
+                   OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1', MKL_NUM_THREADS='1')
         env.pop('RTS2_STAT_DIR', None)
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, env=env, start_new_session=True)
@@ -327,7 +330,9 @@ class Reprocessor:
             with self.lock:
                 self.children.pop(path, None)
 
-        if self.stopping and proc.returncode < 0:
+        # Stopped by us (imgproc exits 1 on SIGTERM): back to the queue.  A
+        # genuine failure that ends during a stop is merely retried.
+        if self.stopping and res['reason'] is None and proc.returncode != 0:
             res.update(status='pending')
             return res, info, out
         if res['reason'] is None:
