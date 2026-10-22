@@ -4,9 +4,9 @@ Operational tooling for the pyrt photometry pipeline: calibration frame creation
 
 ## Components
 
-### `asarina.chip_id`
+### Camera identification
 
-Camera identification registry. Maps FITS header fields (`CCD_SER`, `CCD_TYPE`, etc.) to short camera IDs (e.g. `mi6166`, `andor46`, `fli534`). Used by both calib and pipeline. Single source of truth for all camera identification.
+The camera registry lives in pyrt as `pyrt.utils.chip_id` (CLI `pyrt-chip-id`). It maps FITS header fields (`CCD_SER`, `CCD_TYPE`, etc.) to short camera IDs (e.g. `mi6166`, `andor46`, `fli534`) and is used by both calib and pipeline.
 
 ### `asarina.calib`
 

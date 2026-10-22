@@ -45,7 +45,7 @@ from asarina.pipeline.ingest import PhotometryPipeline
 from asarina.pipeline.pipeline_utils import TransientSearcher, DatabaseUploader, db_gate
 from asarina.pipeline.image import CAMERA_CROPS
 from asarina.pipeline.patch_window import compute_keywords, KNOWN_WINDOW_SIZES
-from asarina.chip_id import get_camera_id
+from pyrt.utils.chip_id import get_camera_id
 
 # Logging is configured in main() after -v is parsed.
 # stdout is reserved for RTS2 (corrwerr).

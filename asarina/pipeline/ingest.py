@@ -153,7 +153,7 @@ class PhotometryPipeline:
         """
         import numpy as np
         from asarina.calib.smart_dark import smart_dark, image_bgsigma
-        from asarina.chip_id import load_chip_id
+        from pyrt.utils.chip_id import load_chip_id
         from asarina.pipeline.image import CAMERA_CROPS
 
         try:

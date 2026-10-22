@@ -49,7 +49,7 @@ except ImportError:
 # flood so progress and the summary stay legible.
 warnings.simplefilter("ignore", AstropyWarning)
 
-from asarina.chip_id import get_camera_id
+from pyrt.utils.chip_id import get_camera_id
 
 IMAGE_EXTS = (".fits", ".fitz")
 

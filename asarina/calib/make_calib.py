@@ -47,7 +47,7 @@ except ImportError:
     print("Error: astropy and numpy are required. Install with: pip install astropy numpy")
     sys.exit(1)
 
-from asarina.chip_id import get_camera_id
+from pyrt.utils.chip_id import get_camera_id
 
 
 def image_hdu(hdul):
