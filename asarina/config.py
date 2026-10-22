@@ -87,7 +87,8 @@ def load_config(config_file: Optional[str] = None,
     If config_file is given, only that file is read.
     Otherwise reads the default cascade (system → user), each overriding the previous.
     """
-    cp = configparser.ConfigParser(default_section=None)
+    # No interpolation: values are taken verbatim, e.g. phdb_date_fmt = %y/%m%d
+    cp = configparser.ConfigParser(default_section=None, interpolation=None)
     cp.read_string(DEFAULT_CONFIG)
 
     if config_file is not None:
