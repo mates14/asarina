@@ -74,6 +74,10 @@ class ImageProcessor:
         self.observation_year = None
         self.ccd_name = None
         self.chip_id = None
+        # Why the last process_object() returned None, for the caller to act
+        # on (asarina-imgproc turns it into its exit code): 'nodark',
+        # 'noflat' or 'unreadable'.
+        self.failure = None
         
     def _round_temperature(self, temp: float) -> int:
         """Round temperature to nearest group."""
@@ -444,11 +448,15 @@ class ImageProcessor:
                 flat_path = self.find_flat(chip, fltr, binx)
 
                 if dark_path is None:
-                    logger.error(f"{output_name}: No suitable dark frame")
+                    self.failure = 'nodark'
+                    logger.error(f"{output_name}: No suitable dark frame "
+                                 f"(chip={chip} temp={temp:.1f} bin={binx} exptime={expt})")
                     return None
 
                 if flat_path is None:
-                    logger.error(f"{output_name}: No suitable flat field")
+                    self.failure = 'noflat'
+                    logger.error(f"{output_name}: No suitable flat field "
+                                 f"(chip={chip} filter={fltr} bin={binx})")
                     return None
 
                 # Load calibration data
@@ -535,6 +543,7 @@ class ImageProcessor:
             return str(output_path)
 
         except Exception as e:
+            self.failure = 'unreadable'
             logger.error(f"Error processing {obj_path}: {e}")
             return None
     

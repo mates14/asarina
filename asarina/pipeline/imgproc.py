@@ -47,6 +47,31 @@ from asarina.pipeline.image import CAMERA_CROPS
 from asarina.pipeline.patch_window import compute_keywords, KNOWN_WINDOW_SIZES
 from pyrt.utils.chip_id import get_camera_id
 
+# Exit codes by PhotometryPipeline.failure, so that a batch driver
+# (asarina-reprocess) can tell a frame that may be saved - a dark or flat
+# supplied, a catalog back - from one that cannot.  1 is anything else: a
+# crash, or a failure without a recorded reason.
+EXIT_CODES = {
+    'nodark':     20,
+    'noflat':     21,
+    'unreadable': 22,
+    'notobject':  23,
+    'nostars':    30,
+    'nosolve':    31,
+    'catalog':    32,
+    'dophot':     33,
+    'astqual':    34,
+    'idnum':      35,
+}
+
+
+def _fail(pipeline) -> None:
+    """Exit with the code of the pipeline's recorded failure"""
+    if pipeline.failure:
+        logger.error(f"FAILED: {pipeline.failure}")
+    sys.exit(EXIT_CODES.get(pipeline.failure, 1))
+
+
 # Logging is configured in main() after -v is parsed.
 # stdout is reserved for RTS2 (corrwerr).
 logger = logging.getLogger(__name__)
@@ -443,6 +468,11 @@ def main():
                         help='Root directory for ECSV output (default: /home/mates/phdb)')
     output.add_argument('--phdb-date-fmt', default='%y%m', metavar='FMT',
                         help='strftime format for ECSV subdirectory (default: %%y%%m)')
+    output.add_argument('--phdb-by-night', action='store_true',
+                        help='Date the ECSV subdirectory by the night (UT - 12 h) '
+                             'instead of the local calendar date')
+    output.add_argument('--no-raw-update', action='store_true',
+                        help='Do not write the WCS into the raw image (read-only archive)')
     output.add_argument('--png-root', default='/home/mates/png')
     output.add_argument('--daily-summary', metavar='DIR', dest='daily_summary_dir',
                         help='Directory for nightly summary .dat files')
@@ -558,6 +588,7 @@ def main():
         phdb_root=args.phdb_root,
         png_root=args.png_root,
         phdb_date_fmt=args.phdb_date_fmt,
+        phdb_by_night=args.phdb_by_night,
         daily_summary_dir=args.daily_summary_dir,
         stat_dir=args.stat_dir,
         smart_dark_calib=args.smart_dark,
@@ -606,7 +637,7 @@ def main():
         # 1. Dark/flat correction
         fits_file = pipeline.calibrate(raw_path, temp_dir)
         if fits_file is None:
-            sys.exit(1)
+            _fail(pipeline)
         calibrated = temp_dir / fits_file
 
         # 2. Web preview — runs in parallel with solve, does not delay corrwerr
@@ -625,7 +656,7 @@ def main():
             # lock, causing the next image's preview to be skipped too.
             if web_thread is not None:
                 web_thread.join(timeout=30)
-            sys.exit(1)
+            _fail(pipeline)
 
         # 3.5. Report FWHM from phcat catalog to RTS2 (real-time only)
         if realtime_now:
@@ -637,7 +668,8 @@ def main():
         # one that landed in bad/ because real-time processing failed), and
         # this is the only chance to give it a WCS - the archive is root-owned
         # and privileges are dropped below, before the dophot refinement.
-        _copy_wcs_to_raw(calibrated, raw_path, chip_id)
+        if not args.no_raw_update:
+            _copy_wcs_to_raw(calibrated, raw_path, chip_id)
 
         # 5. Report to RTS2 — corrwerr must be on stdout, nothing else may be
         if args.realtime:
@@ -680,7 +712,7 @@ def main():
         # 6. Refined photometry (as mates)
         ecsv = pipeline.photometry(fits_file, temp_dir, sip=args.sip, passes=args.passes)
         if ecsv is None:
-            sys.exit(1)
+            _fail(pipeline)
 
         # 7. Save ECSV and PNG to phdb/png (as mates)
         ecsv_path = None
@@ -694,7 +726,8 @@ def main():
             if reason:
                 logger.warning(f"Not uploading {Path(ecsv_path).name} to the photometric database: {reason}")
             else:
-                DatabaseUploader(ssh_key=args.ssh_key).upload_ecsv(ecsv_path)
+                DatabaseUploader(ssh_key=args.ssh_key,
+                                 local_phdb=args.phdb_root).upload_ecsv(ecsv_path)
 
         # 9. Notify transient daemon (as mates, so fnovotny can read the files).
         # Real-time only: an offline batch would feed it the whole archive.

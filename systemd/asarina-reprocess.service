@@ -1,0 +1,22 @@
+[Unit]
+Description=asarina archive reprocessing (D50 and SBT, newest frame first)
+After=network-online.target remote-fs.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mates
+Group=mates
+Environment=PATH=/home/mates/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=TERM=xterm
+ExecStart=/home/mates/.local/bin/asarina-reprocess run
+# Frames being processed when stopped go back to the queue; let the main
+# process kill them and record that before systemd kills the rest.
+KillMode=mixed
+TimeoutStopSec=60
+Restart=always
+RestartSec=60
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

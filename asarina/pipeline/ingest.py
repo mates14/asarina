@@ -31,6 +31,7 @@ class PhotometryPipeline:
                  pixel_scale: float = None,
                  # Output layout
                  phdb_date_fmt: str = "%y%m",
+                 phdb_by_night: bool = False,
                  daily_summary_dir: str = None,
                  stat_dir: str = None,
                  # Photometry overrides
@@ -56,6 +57,10 @@ class PhotometryPipeline:
         self.smart_dark_calib = smart_dark_calib
         self.pixel_scale = pixel_scale
         self.phdb_date_fmt = phdb_date_fmt
+        # Date the phdb subdirectory by the night (UT - 12 h, as the RTS2
+        # archive does) rather than by the local calendar date, so that a
+        # night's frames stay together, e.g. in %y/%m%d.
+        self.phdb_by_night = phdb_by_night
         self.daily_summary_dir = Path(daily_summary_dir) if daily_summary_dir else None
         # stat_dir: where per-night stat ECSVs are written.
         # None disables stat logging.  Can also be set via RTS2_STAT_DIR env var.
@@ -98,6 +103,12 @@ class PhotometryPipeline:
         #   - camera crop for mi0315 in smart_dark path
         self.makak_mode = makak_mode
 
+        # Why the last phase failed, None while all went well: 'nodark',
+        # 'noflat', 'unreadable', 'notobject' (calibrate), 'nostars',
+        # 'nosolve' (solve), 'catalog', 'dophot', 'astqual', 'idnum'
+        # (photometry).  asarina-imgproc exits with a code for each.
+        self.failure = None
+
         self.image_processor = ImageProcessor(calib_root=calib_root,
                                               calib_dir_template=calib_dir_template)
 
@@ -114,6 +125,8 @@ class PhotometryPipeline:
             return None
 
     def _get_year_month_code(self, ctime: float) -> str:
+        if self.phdb_by_night:
+            return datetime.utcfromtimestamp(ctime - 43200).strftime(self.phdb_date_fmt)
         return datetime.fromtimestamp(ctime).strftime(self.phdb_date_fmt)
 
     def _check_existing_ecsv(self, image_path: str) -> Optional[str]:
@@ -140,6 +153,7 @@ class PhotometryPipeline:
         processor.load_calibration_frames([str(image_path)])
         processed = processor.process_all_objects(output_dir=str(temp_dir), overwrite=True, photometry=False)
         if not processed:
+            self.failure = processor.failure or ('unreadable' if processor.objects else 'notobject')
             logger.error(f"Dark/flat correction produced no output for {image_path.name}")
             return None
         return Path(processed[0]).name
@@ -193,6 +207,7 @@ class PhotometryPipeline:
             return output_name
 
         except Exception as e:
+            self.failure = 'unreadable'
             logger.error(f"Smart dark calibration failed for {image_path.name}: {e}")
             return None
 
@@ -240,6 +255,7 @@ class PhotometryPipeline:
         if ret.returncode != 0:
             out = (ret.stdout or '').rstrip()
             err = (ret.stderr or '').rstrip()
+            self.failure = 'nostars'
             logger.error(f"pyrt-phcat failed"
                          + (f"\nstdout:\n{out}" if out else '')
                          + (f"\nstderr:\n{err}" if err else ''))
@@ -265,6 +281,7 @@ class PhotometryPipeline:
         if ret.returncode != 0:
             out = (ret.stdout or '').rstrip()
             err = (ret.stderr or '').rstrip()
+            self.failure = 'nosolve'
             logger.error(f"pyrt-field-solve failed after {elapsed:.3f}s"
                          + (f"\nstdout:\n{out}" if out else '')
                          + (f"\nstderr:\n{err}" if err else ''))
@@ -303,6 +320,7 @@ class PhotometryPipeline:
         if ret.returncode != 0:
             out = (ret.stdout or '').rstrip()
             err = (ret.stderr or '').rstrip()
+            self.failure = 'catalog'
             logger.error(f"pyrt-cat2det failed"
                          + (f"\nstdout:\n{out}" if out else '')
                          + (f"\nstderr:\n{err}" if err else ''))
@@ -372,6 +390,7 @@ class PhotometryPipeline:
             qual = self._astqual(temp_dir / ecsv_file)
 
         if qual != 'OK':
+            self.failure = 'astqual'
             logger.error(f"ASTQUAL={qual} — rejecting solution")
             return None
 
@@ -379,6 +398,7 @@ class PhotometryPipeline:
         meta = Table.read(str(temp_dir / ecsv_file), format='ascii.ecsv').meta
         idnum = meta.get('IDNUM')
         if idnum is None or int(idnum) <= 20:
+            self.failure = 'idnum'
             logger.error(f"IDNUM={idnum} <= 20 — rejecting solution")
             return None
         logger.info(f"Solution quality ok: ASTQUAL={qual} ASTCOVER={meta.get('ASTCOVER')}"
@@ -417,6 +437,7 @@ class PhotometryPipeline:
             if ret.returncode != 0:
                 out = (ret.stdout or '').rstrip()
                 err = (ret.stderr or '').rstrip()
+                self.failure = 'dophot'
                 logger.error(f"pyrt-dophot pass {pass_num} failed after {elapsed:.3f}s"
                              + (f"\nstdout:\n{out}" if out else '')
                              + (f"\nstderr:\n{err}" if err else ''))
@@ -428,6 +449,7 @@ class PhotometryPipeline:
             logger.info(f"pyrt-dophot pass {pass_num} took {elapsed:.3f}s")
 
             if not (temp_dir / ecsv_file).exists():
+                self.failure = 'dophot'
                 logger.error(f"ECSV {ecsv_file} missing after pyrt-dophot pass {pass_num}")
                 return False
         return True

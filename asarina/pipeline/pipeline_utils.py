@@ -192,7 +192,7 @@ class DatabaseUploader:
             return False
         try:
             ecsv_name = ecsv_path.name
-            relative_path = ecsv_path.parent.relative_to(self.local_phdb)
+            relative_path = ecsv_path.parent.relative_to(Path(self.local_phdb).expanduser())
             remote_path = f"{self.remote_ecsv}/{relative_path}"
             logger.info(f"Uploading {ecsv_name} to {remote_path}")
 

@@ -23,6 +23,9 @@ Recognised keys (underscores or dashes interchangeable):
   dophot_idlimit    int
   dophot_max_stars  int    1000
   dophot_workers    int           pyrt-dophot --workers (default: one per CPU)
+  phdb_root         str    /home/mates/phdb  ECSV output root
+  phdb_date_fmt     str    %y%m   strftime of the ECSV subdirectory
+  phdb_by_night     bool   false  date it by the night (UT - 12 h), not local time
   smart_dark        str
   stat_dir          str
   model_file        str
@@ -65,7 +68,8 @@ USER_CONFIG_FILE   = '~/.config/asarina/config'
 # string configparser read.  For a float that is a TypeError at the first
 # comparison; for a bool it is worse and silent, since "false" is a non-empty
 # string and therefore true.  Add new typed options here as they appear.
-_BOOL_KEYS  = frozenset({'sbt_window_patch', 'makak', 'refit_zpn', 'zpn_from_camera'})
+_BOOL_KEYS  = frozenset({'sbt_window_patch', 'makak', 'refit_zpn', 'zpn_from_camera',
+                         'phdb_by_night'})
 _INT_KEYS   = frozenset({'sip', 'passes', 'dophot_idlimit', 'dophot_max_stars', 'dophot_workers',
                          'db_min_idnum'})
 _FLOAT_KEYS = frozenset({'pixel_scale', 'dophot_maglim', 'dophot_enlarge',
