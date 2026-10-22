@@ -627,6 +627,10 @@ def main():
                 logger.debug("sbt-window-patch: LTV1/2 already present, skipping")
             elif naxis1 == naxis2 and naxis1 in KNOWN_WINDOW_SIZES:
                 kw = compute_keywords(naxis1, chip_w=4144, chip_h=4127, shift=0)
+                if args.no_raw_update:
+                    # read-only archive: patch a copy, calibrate that
+                    shutil.copyfile(str(raw_path), str(temp_dir / raw_path.name))
+                    raw_path = temp_dir / raw_path.name
                 with fits.open(str(raw_path), mode='update') as hdul:
                     for key, (val, comment) in kw.items():
                         hdul[0].header[key] = (val, comment)
