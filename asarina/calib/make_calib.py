@@ -38,6 +38,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 from collections import defaultdict
+from functools import lru_cache
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 try:
@@ -48,6 +49,7 @@ except ImportError:
     sys.exit(1)
 
 from pyrt.utils.chip_id import get_camera_id
+from pyrt.utils.camera_config import CameraParams
 
 
 def image_hdu(hdul):
@@ -515,103 +517,8 @@ def get_stats_cache() -> StatsCache:
     return _stats_cache
 
 
-# Camera noise model parameters: (expected_sigma, tolerance)
-# These are used to validate dark frames by comparing pairs
-# Keys are camera_id from chip_id.py registry
-CAMERA_NOISE_MODELS = {
-    # D50 cameras
-    "andor46": {  # Andor iXon-Ultra DU888, serial 10046
-        # sigma = sqrt(8.09² + 0.052 * exptime), from fit to noise-andor46.out
-        "1x1": lambda exp, temp: (math.sqrt(8.09**2 + 0.052 * exp), 0.10),
-        "2x2": lambda exp, temp: (8.36174, 0.16),
-    },
-    # BOOTES-2 / COLORES Andor iXon, serial 3567
-    "andor3567": {
-        # Pair-difference sigma measured flat at ~3.0 ADU across 1-300 s at
-        # -58.5 C (read-noise dominated, negligible dark current). Wide-ish
-        # tolerance covers the observed 1.9-3.65 spread; refine from
-        # noise-andor3567.out once a validated run accumulates data.
-        "1x1": lambda exp, temp: (3.0, 0.5),
-        "2x2": lambda exp, temp: (3.0, 0.5),  # TODO: verify if 2x2 darks appear
-    },
-    # BOOTES-2 Andor iXon, serial 1708 - REGIME-KEYED (by readout mode), because
-    # the conventional and EM output registers have very different read noise.
-    # Floors from --measure-noise on 2009 (noise-andor1708): pair-difference
-    # sigma flat across 1-60 s at the cold setpoints, read-noise dominated.
-    #   CO-0-14-1.0 (conventional, 14-bit): floor ~2.2 ADU (= the ~2.2 read noise)
-    #   EM-0/EM-1   (EM register, 14-bit):  floor ~3.8 ADU (EM excess noise)
-    # The lone -140 C / 1.18-ADU EM-1 cluster is a spurious-temperature (likely
-    # high-EM-gain) outlier that cannot be keyed (old driver omits EMCCDGAIN); it
-    # falls below this window and is correctly rejected rather than averaged in.
-    "andor1708": {
-        "CO-0-14-1.0": {"1x1": lambda exp, temp: (2.2, 0.5)},
-        "EM-0-14-1.0": {"1x1": lambda exp, temp: (3.8, 0.6)},
-        "EM-1-14-1.0": {"1x1": lambda exp, temp: (3.8, 0.6)},
-    },
-    "fli534": {  # FLI IMG4710 EEV CCD47-10, serial suffix 258.534
-        # sigma = sqrt(5.72² + 0.0595 * exptime), from fit to noise-fli534.out
-        "1x1": lambda exp, temp: (math.sqrt(5.72**2 + 0.0595 * exp), 0.10),
-        # 2x2: same readnoise, 4x dark current (assumes same gain) - verify when data available
-        "2x2": lambda exp, temp: (math.sqrt(5.72**2 + 0.238 * exp), 0.15),
-    },
-    # BART/CNF cameras
-    "fli785": {  # FLI MAXcam EEV CCD47-10, serial suffix 259.785
-        "1x1": lambda exp, temp: (
-            (6.23999194857853**2 + 2.66690536046723 * (exp + 4.04663672443005) * (2.0 ** (temp / 4.82527675675717))) ** 0.5,
-            0.05
-        ),
-        "2x2": lambda exp, temp: (
-            (7.07675537020698**2 + 11.8171601133346 * (exp - 0.109076116406907) * (2.0 ** (temp / 4.48092070386459))) ** 0.5,
-            0.05
-        ),
-    },
-    # SBT cameras
-    "mi6166": {  # Moravian G4-16000 Kodak KAF-16803 (SBT C1)
-        # sigma = sqrt(10.62² + 0.042 * exptime), from the clean groups (2-12 s,
-        # 60 s, 180 s) of the 2026 --measure-noise run; the floor was 10.02.
-        # The odd 13-28 s exposures are flat darks, taken next to the flats and
-        # probably carrying RBI: they climb to ~11.3 with exposure time. They
-        # must still pass - a little light in a flat dark does no harm - so the
-        # tolerance is wide; it only has to catch damaged darks (light leak,
-        # shutter not closed), which land far above.
-        "1x1": lambda exp, temp: (math.sqrt(10.62**2 + 0.042 * exp), 0.5),
-        "2x2": lambda exp, temp: (math.sqrt(10.62**2 + 0.042 * exp), 0.5),  # TODO: verify 2x2
-    },
-    "mi6167": {  # Moravian G4-16000 Kodak KAF-16803 (SBT C2)
-        # sigma = sqrt(8.72² + 0.030 * exptime), from the clean groups (1 s,
-        # 29/30 s, 60 s, 120 s) of the 2026 --measure-noise run. Until now C2
-        # fell back to DEFAULT_NOISE_MODEL (8.0 +- 0.5), whose 9.0 ceiling
-        # rejected most of its darks. The flat darks (2-28 s) run up to 9.5
-        # and must pass, as for mi6166.
-        "1x1": lambda exp, temp: (math.sqrt(8.72**2 + 0.030 * exp), 0.4),
-        "2x2": lambda exp, temp: (math.sqrt(8.72**2 + 0.030 * exp), 0.4),  # TODO: verify 2x2
-    },
-    "mi0206": {  # Moravian, 1536x1024 (SBT)
-        # Flat 8.74-8.90 over 1-120 s in the 2026 --measure-noise run, no
-        # dark-current trend; until now it fell back to DEFAULT (8.0 +- 0.5).
-        "1x1": lambda exp, temp: (8.82, 0.25),
-        "2x2": lambda exp, temp: (8.82, 0.25),  # TODO: verify 2x2
-    },
-    # Mobile backup cameras
-    "mi2066": {  # Moravian G2-1600 Kodak KAF-1603
-        "1x1": lambda exp, temp: (9.8 - 0.4, 0.2),
-        "2x2": lambda exp, temp: (7.74, 0.2),
-    },
-    "mi2065": {  # Moravian G2-1600, new electronics
-        "1x1": lambda exp, temp: (9.65, 0.2),
-        "2x2": lambda exp, temp: (8.20603, 0.2),
-    },
-    "mi2065v1": {  # Moravian G2-1600, old electronics
-        "1x1": lambda exp, temp: (10.6275, 0.2),
-        "2x2": lambda exp, temp: (10.6275, 0.2),
-    },
-}
-
-# Default filtering criteria when camera is not in the noise model
-DEFAULT_NOISE_MODEL = {
-    "1x1": lambda exp, temp: (8.0, 0.5),
-    "2x2": lambda exp, temp: (8.0, 0.5),
-}
+# Camera noise models (expected pair-difference sigma of two darks, tolerance)
+# are the noise.* keys of pyrt's cameras.ini, see get_camera_noise_params().
 
 
 @dataclass
@@ -1193,23 +1100,41 @@ def validate_dark_pair(file1: str, file2: str, expected_sigma: float, tolerance:
         return False, -1.0
 
 
+@lru_cache(maxsize=None)
+def _camera_params(camera_id: str) -> CameraParams:
+    return CameraParams(camera_id, None, None)
+
+
 def get_camera_noise_params(camera_id: str, binning: str, exptime: float,
                             temp: float, readmode: str = "") -> tuple:
     """Get expected noise parameters for a camera (by camera_id from registry).
 
-    A camera entry is either binning-keyed ({"1x1": lambda, ...}) or, when its
+    The model is the noise.<binning> key of cameras.ini (pyrt.utils.camera_config),
+    "rn=.. [dark=.. t0=.. tdouble=..] tol=..", giving
+    sigma = sqrt(rn² + dark*(exptime + t0) * 2**(temp/tdouble)).  When a camera's
     readout regimes have materially different floors (e.g. the andor1708 iXon:
-    conventional ~2.2 ADU vs EM-register ~3.8 ADU), readmode-keyed
-    ({"CO-0-14-1.0": {"1x1": lambda, ...}, ...}). Descend by readmode first in
-    that case, falling back to DEFAULT for an unlisted regime.
+    conventional ~2.2 ADU vs EM-register ~3.8 ADU) its keys are
+    noise.<binning>.<readmode>, and an unlisted regime gets the [DEFAULT] model.
+    A binning the camera lacks falls back to its 1x1.
     """
-    model = CAMERA_NOISE_MODELS.get(camera_id, DEFAULT_NOISE_MODEL)
-    # Regime-keyed camera: values are per-binning sub-dicts, not callables.
-    if model and all(isinstance(v, dict) for v in model.values()):
-        model = model.get(readmode) or model.get("", DEFAULT_NOISE_MODEL)
-    bin_model = model.get(binning, model.get("1x1", DEFAULT_NOISE_MODEL["1x1"]))
+    cam = _camera_params(camera_id)
+    own = {k for k, src in cam.source.items()
+           if k.startswith('noise.') and not src.endswith('[DEFAULT]')}
+    suffix = ''
+    if any(k.count('.') >= 2 for k in own):     # regime-keyed camera
+        suffix = f'.{readmode}'
+        own = {k for k in own if readmode and k.endswith(suffix)}
+    for key in (f'noise.{binning}{suffix}', f'noise.1x1{suffix}'):
+        if key in own:
+            break
+    else:
+        key = f'noise.{binning}' if f'noise.{binning}' in cam else 'noise.1x1'
 
-    return bin_model(exptime, temp)
+    m = {k: float(v) for k, v in (item.split('=') for item in cam.get(key, type=str).split())}
+    dark = m.get('dark', 0.0) * (exptime + m.get('t0', 0.0))
+    if 'tdouble' in m:
+        dark *= 2.0 ** (temp / m['tdouble'])
+    return math.sqrt(m['rn']**2 + dark), m['tol']
 
 
 def lowest_noise_peak(sigmas: list, zero_floor: float = 0.3) -> Optional[float]:
@@ -1278,8 +1203,8 @@ def measure_dark_noise(dark_groups: dict, camera_id: str,
     For each (temp, exp, bin, size, readmode) group, diff up to n_pairs random
     frame pairs, collect the distribution of sigmas, and print the lowest
     non-zero peak (the physically-correct read-noise floor) alongside the spread.
-    The lowest peak per (binning, readmode) is the number to drop into
-    CAMERA_NOISE_MODELS. Builds nothing and writes nothing - pure measurement.
+    The lowest peak per (binning, readmode) is the number to drop into the
+    noise.* keys of cameras.ini. Builds nothing and writes nothing - pure measurement.
     """
     workers = min(n_workers or os.cpu_count() or 1, MAX_WORKERS)
     log(f"\n{'='*78}", "info")
@@ -1335,9 +1260,8 @@ def measure_dark_noise(dark_groups: dict, camera_id: str,
         floor = lowest_noise_peak(pooled)
         if floor is None:
             continue
-        mode_note = f"  # readmode {readmode}" if readmode else ""
-        log(f'  CAMERA_NOISE_MODELS["{camera_id}"]["{binning}"] = '
-            f"lambda exp, temp: ({floor:.1f}, 0.5){mode_note}", "info")
+        mode = f".{readmode}" if readmode else ""
+        log(f"  [{camera_id}] noise.{binning}{mode} = rn={floor:.1f} tol=0.5", "info")
 
 
 def select_valid_darks(dark_group: list, validate: bool = True) -> list:
@@ -2140,8 +2064,8 @@ def run_measure_noise(config: CalibConfig, year: str, camera: Optional[str] = No
     Mirrors the discovery + stats + camera grouping of process_calibrations, but
     skips quality filtering and master-frame creation: it diffs raw dark pairs so
     the full noise distribution is visible (the lowest-peak finder picks out the
-    good cluster even when exposed/dead frames are mixed in). Use it to derive a
-    CAMERA_NOISE_MODELS entry for a camera that has none (e.g. andor1708).
+    good cluster even when exposed/dead frames are mixed in). Use it to derive the
+    cameras.ini noise.* entry for a camera that has none (e.g. andor1708).
     """
     log(f"Measuring dark noise for {year} from {config.archive_base}", "info")
     if layout == "auto":
@@ -2239,7 +2163,7 @@ Examples:
                         help="Measure model-free dark-difference noise per group "
                              "and exit (no masters built). Reports the lowest "
                              "non-zero peak per binning = the read-noise floor to "
-                             "put in CAMERA_NOISE_MODELS. Use for a camera with no "
+                             "put in cameras.ini (noise.*). Use for a camera with no "
                              "model yet (e.g. andor1708).")
     parser.add_argument("--measure-pairs", type=int, default=60,
                         help="Max random dark pairs to diff per group in "
