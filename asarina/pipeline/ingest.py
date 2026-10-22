@@ -78,8 +78,10 @@ class PhotometryPipeline:
         self.dophot_idlimit = dophot_idlimit
         self.dophot_max_stars = dophot_max_stars
         # Processes for pyrt-dophot's stepwise term search (--workers).  None
-        # leaves pyrt's default, one per CPU, which suits a single real-time
-        # frame; a batch run with one frame per core wants 1.
+        # leaves pyrt's default, in-process: its trials are single linear
+        # solves, cheaper than starting worker processes.  N > 1 asks for a
+        # pool of N (0 is not passed on, so pyrt's own 0 = one per CPU is not
+        # reachable from here).
         self.dophot_workers = dophot_workers
         # Refit the ZPN radial projection terms (-z). Off by default: on a
         # subsampled star list the ZPN refit is under-constrained and can blow

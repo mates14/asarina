@@ -507,8 +507,8 @@ def main():
                       help='Max stars for dophot (0 = no limit; default 1000)')
     phot.add_argument('--dophot-workers', type=int, metavar='N',
                       help='Processes for the pyrt-dophot stepwise term search '
-                           '(default: one per CPU). Batch reprocessing that runs '
-                           'one frame per core wants 1.')
+                           '(default: in-process, as pyrt does; N > 1 for a pool '
+                           'of N processes).')
     phot.add_argument('--refit-zpn', action='store_true',
                       help='Refit ZPN radial terms (pyrt-dophot -z) from the '
                            'second pass on. Off by default, and never applied '
