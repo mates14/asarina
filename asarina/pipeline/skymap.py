@@ -16,7 +16,8 @@ at any time:
 flux is per tile pixel, on the AB scale with zero point 25 (m = 25 - 2.5 log f):
 the frame's background is subtracted and its ADU are scaled by dophot's
 photometric model (Z and the spatial terms, at zero color); w = 1/sigma^2 of
-the sky noise, so frames count by their depth.  A running weighted mean cannot
+the sky noise, so frames count by their depth, faded in by sin() over the
+EDGE px next to the frame edge, so that no frame leaves a step where it ends.  A running weighted mean cannot
 reject outliers: trails and cosmics fade with the number of frames, no more.
 
 `export` writes sum/weight per tile (NaN where nothing was added), the input
@@ -47,6 +48,7 @@ BANDS = {'Sloan_g': 'g', 'Sloan_r': 'r', 'Sloan_i': 'i'}
 FWHM_MAX = 2.5              # px
 DMAGZERO_MAX = 0.05
 
+EDGE = 30                   # frame px over which the weight fades in from the frame edge
 BOX = 256                   # background grid, px (~13' on SBT)
 GRID = 16                   # tile px between exact WCS evaluations
 
@@ -247,7 +249,9 @@ def _candidate_tiles(wcs, shape):
 
 def _resample(tile_hdr, fwcs, flux, sigma_scale):
     """The frame on the tile: flux per tile pixel (bilinear, NaN wherever a bad
-    or outside pixel takes part) and its noise; (y0, x0, flux, sigma) or None.
+    or outside pixel takes part), its noise and the edge fade of the weight,
+    sin() from 0 at the frame edge to 1 at EDGE px in; (y0, x0, flux, sigma,
+    fade) or None.
     flux is per frame pixel with bad pixels NaN, sigma_scale a _Smooth of its
     noise."""
     from astropy.wcs import WCS
@@ -290,7 +294,9 @@ def _resample(tile_hdr, fwcs, flux, sigma_scale):
     area = _Smooth(gy, gx, area).grid(ty, tx)
 
     f = map_coordinates(flux, [py, px], order=1, mode='constant', cval=np.nan, prefilter=False)
-    return y0, x0, f * area, sigma
+    edge = np.minimum(np.minimum(px, nx - 1 - px), np.minimum(py, ny - 1 - py))
+    fade = np.sin(np.pi / 2 * np.clip(edge / EDGE, 0, 1)).astype(np.float32)
+    return y0, x0, f * area, sigma, fade
 
 
 def _add_to_tile(path, hdr, frame, y0, x0, wf, w):
@@ -386,11 +392,11 @@ def add_frame(fits_path, ecsv_path, mapdir):
         res = _resample(hdr, fwcs, data, sigma_scale)
         if res is None:
             continue
-        y0, x0, f, s = res
-        use = np.isfinite(f) & (s > 0)
+        y0, x0, f, s, fade = res
+        use = np.isfinite(f) & (s > 0) & (fade > 0)
         if not use.any():
             continue
-        w = np.where(use, 1 / np.where(use, s, 1) ** 2, 0).astype(np.float32)
+        w = np.where(use, fade / np.where(use, s, 1) ** 2, 0).astype(np.float32)
         if _add_to_tile(tile_path(mapdir, band, int(ipix)), hdr, frame, y0, x0,
                         np.where(use, w * f, 0).astype(np.float32), w):
             added += 1
