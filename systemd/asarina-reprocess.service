@@ -7,8 +7,8 @@ Wants=network-online.target
 Type=simple
 User=mates
 Group=mates
-# asarina and pyrt installed system-wide; ~/bin last, for atlas (catalog extraction)
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/mates/bin
+# asarina, pyrt and atlas (catalog extraction) installed system-wide
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=TERM=xterm
 ExecStart=/usr/local/bin/asarina-reprocess run
 # Frames being processed when stopped go back to the queue; let the main
