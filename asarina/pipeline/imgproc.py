@@ -473,6 +473,8 @@ def main():
                              'instead of the local calendar date')
     output.add_argument('--no-raw-update', action='store_true',
                         help='Do not write the WCS into the raw image (read-only archive)')
+    output.add_argument('--skymap-dir', metavar='DIR',
+                        help='Add good g/r/i frames to the sky map tiles in DIR (asarina-skymap)')
     output.add_argument('--png-root', default='/home/mates/png')
     output.add_argument('--daily-summary', metavar='DIR', dest='daily_summary_dir',
                         help='Directory for nightly summary .dat files')
@@ -732,6 +734,17 @@ def main():
             else:
                 DatabaseUploader(ssh_key=args.ssh_key,
                                  local_phdb=args.phdb_root).upload_ecsv(ecsv_path)
+
+        # 8.5. Sky map: the calibrated frame exists only here, in temp_dir.
+        # A map failure is logged, the frame itself is done.
+        if ecsv_path is not None and args.skymap_dir:
+            try:
+                from asarina.pipeline.skymap import add_frame
+                t_map = time.time()
+                res = add_frame(calibrated, ecsv_path, args.skymap_dir)
+                logger.info(f"skymap: {res} ({time.time() - t_map:.1f}s)")
+            except Exception as e:
+                logger.exception(f"skymap: {e}")
 
         # 9. Notify transient daemon (as mates, so fnovotny can read the files).
         # Real-time only: an offline batch would feed it the whole archive.
