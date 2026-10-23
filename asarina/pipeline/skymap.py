@@ -21,10 +21,10 @@ EDGE px next to the frame edge, so that no frame leaves a step where it ends.  A
 reject outliers: trails and cosmics fade with the number of frames, no more.
 
 `export` writes sum/weight per tile (NaN where nothing was added), the input
-directory for Hipsgen:
+directory for Hipsgen; `hips` does the whole rebuild: export, a HiPS per band
+with Hipsgen and the gri color HiPS (i red, r green, g blue):
 
-    java -Xmx64g -jar Hipsgen.jar in=<export>/r out=<hips>/r id=ASU/P/SBT/r \\
-         mode=overlayMean
+    asarina-skymap hips         # /storage2/reprocess/{skymap,export,hips}
 """
 
 import argparse
@@ -429,6 +429,48 @@ def export(mapdir, outdir, bands):
     return written
 
 
+ROOT = '/storage2/reprocess'
+RGB = (('inRed', 'i'), ('inGreen', 'r'), ('inBlue', 'g'))
+
+
+def hips(mapdir, exportdir, hipsdir, jar, memory, threads):
+    """Export, then a fresh HiPS per band and the gri color HiPS; False if
+    Hipsgen failed somewhere (its log is <hipsdir>/<band>.log)"""
+    import subprocess
+    logger.info(f"{export(mapdir, exportdir, sorted(BANDS.values()))} tiles exported")
+    java = ['nice', 'java', f'-Xmx{memory}', '-jar', jar, '-nocolor', '-clean']
+    Path(hipsdir).mkdir(parents=True, exist_ok=True)
+
+    def run(name, params):
+        log = Path(hipsdir) / f"{name}.log"
+        logger.info(f"Hipsgen {name} (log {log})")
+        with open(log, 'w') as f:
+            rc = subprocess.run(java + params, stdout=f, stderr=subprocess.STDOUT).returncode
+        if rc:
+            logger.error(f"Hipsgen {name} failed (exit {rc}), see {log}")
+        return rc == 0
+
+    ok, built = True, []
+    for band in sorted(BANDS.values()):
+        if not any((Path(exportdir) / band).glob('*/*.fits')):
+            continue
+        # order=7 (3.22"): Hipsgen takes the pixel scale from CD1_1 alone,
+        # which the rotated tiles make 2.22", and would go to order 8
+        if run(band, [f'in={exportdir}/{band}', f'out={hipsdir}/{band}',
+                      f'id=ASU/P/SBT/{band}', f'obs_title=SBT Sloan {band}', 'order=7',
+                      'mode=overlayMean', f'maxthread={threads}', 'pixelCut=0.5% 99.5% asinh']):
+            built.append(band)
+        else:
+            ok = False
+
+    colors = [f'{key}={hipsdir}/{band}' for key, band in RGB if band in built]
+    if len(colors) >= 2:
+        ok &= run('gri', colors + [f'out={hipsdir}/gri', 'id=ASU/P/SBT/gri',
+                                   f'obs_title=SBT {"".join(b for _, b in RGB[::-1] if b in built)}',
+                                   f'maxthread={threads}', 'RGB'])
+    return ok
+
+
 def main():
     parser = argparse.ArgumentParser(description='Sky map tiles for Hipsgen',
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -441,6 +483,14 @@ def main():
     p.add_argument('--dir', required=True, help='map directory')
     p.add_argument('--out', required=True, help='Hipsgen input directory')
     p.add_argument('--band', action='append', choices=sorted(BANDS.values()))
+    p = sub.add_parser('hips', help='full rebuild: export, HiPS per band and gri color HiPS')
+    p.add_argument('--dir', default=f'{ROOT}/skymap', help='map directory (default: %(default)s)')
+    p.add_argument('--export', default=f'{ROOT}/export',
+                   help='Hipsgen input directory (default: %(default)s)')
+    p.add_argument('--hips', default=f'{ROOT}/hips', help='HiPS output (default: %(default)s)')
+    p.add_argument('--jar', default=f'{ROOT}/Hipsgen.jar', help='(default: %(default)s)')
+    p.add_argument('--memory', default='32g', help='java -Xmx (default: %(default)s)')
+    p.add_argument('--threads', type=int, default=8, help='(default: %(default)s)')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(message)s')
 
@@ -449,9 +499,12 @@ def main():
             sys.exit('give FITS ECSV pairs')
         for fits_path, ecsv_path in zip(args.pairs[::2], args.pairs[1::2]):
             logger.info(f"{Path(fits_path).name}: {add_frame(fits_path, ecsv_path, args.dir)}")
-    else:
+    elif args.cmd == 'export':
         n = export(args.dir, args.out, args.band or sorted(BANDS.values()))
         logger.info(f"{n} tiles exported")
+    else:
+        sys.exit(0 if hips(args.dir, args.export, args.hips, args.jar,
+                           args.memory, args.threads) else 1)
 
 
 if __name__ == '__main__':
