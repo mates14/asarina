@@ -20,6 +20,11 @@ fi
 result=$1
 shift
 
+# fitcheck.py sits next to this script; python must see the real HOME (user
+# site-packages), not the per-run IRAF HOME set below
+script_dir=$(dirname "$(readlink -f "$0")")
+real_home=$HOME
+
 N=$#
 if [ $N -gt 150 ]; then
     echo "Error: this script handles at most 150 frames (got $N)"
@@ -49,6 +54,7 @@ trap "rm -rf $tempdir" EXIT
 # on top (old D50 archive) is decompressed by cfitsio on the fly.
 # Sequential names avoid collisions between same-named frames from other nights.
 > "$tempdir/files.lst"
+> "$tempdir/names.lst"
 i=0
 for f in "$@"; do
     out=$(printf "in_%05d.fits" "$i")
@@ -58,6 +64,7 @@ for f in "$@"; do
     esac
     imcopy "$f$sec" "$tempdir/$out"
     echo "$out" >> "$tempdir/files.lst"
+    echo "$f" >> "$tempdir/names.lst"
     i=$((i+1))
 done
 cd "$tempdir"
@@ -77,12 +84,23 @@ fi
 
 # files.lst was written during staging above (in_NNNNN.fits, one per line)
 
-# Calculate rejection parameters
-nrej=$((N / 5))
-
 # Run IRAF (with timeout to prevent zombie ecl.e processes)
 echo 'images
 imsurfit @files.lst @files.lst//-f 1 3 xmedian=64 ymedian=64 type_ou=fit
+logout
+' | timeout -s KILL 3600 $IRAF_CL
+
+# The fits are averaged without rejection, so a frame whose fit is far off
+# (saturated rows, light, residual image) would bend the whole master: drop
+# such frames from files.lst, i.e. from both the fit average and the residuals
+HOME="$real_home" python3 "$script_dir/fitcheck.py" dark "${ASARINA_DARK_FIT_MAXDEV:-100}" files.lst names.lst \
+    || echo "fitcheck: failed, all frames kept"
+N=$(wc -l < files.lst)
+
+# Calculate rejection parameters
+nrej=$((N / 5))
+
+echo 'images
 imcombine @files.lst//-f ave.fits combine=average
 imarith @files.lst - @files.lst//-f @files.lst//-r
 imcombine @files.lst//-r res.fits combine=average reject=minmax nlow='$nrej' nhigh='$nrej'

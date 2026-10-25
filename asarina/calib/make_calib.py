@@ -1535,11 +1535,26 @@ def run_mixdark(output: str, input_files: list, maxparam: int = 150) -> bool:
             log(f"stdout: {result.stdout[:500]}", "debug")
         return False
 
+    log_fitcheck(result.stdout)
     return True
 
 
-def run_mixflat(output: str, input_files: list) -> bool:
-    """Run mixflat.py to combine flat frames."""
+def log_fitcheck(stdout: str, names: dict = None):
+    """Relay the fitcheck.py report from the combine scripts: the per-group
+    summary at debug level, every dropped frame at info (temp file names
+    translated back to the archive frame through names)."""
+    for line in stdout.splitlines():
+        if not line.startswith("fitcheck:"):
+            continue
+        for tmp, orig in (names or {}).items():
+            line = line.replace(tmp, orig)
+        level = "info" if "dropped" in line or "WARNING" in line or "failed" in line else "debug"
+        log(f"  {line}", level)
+
+
+def run_mixflat(output: str, input_files: list, names: dict = None) -> bool:
+    """Run mixflat.py to combine flat frames (names: temp file -> archive frame,
+    for the report of frames dropped by the combine)."""
     mixflat_path = find_script("mixflat.py")
 
     # mixflat.py handles chunking and parallelism internally
@@ -1551,6 +1566,7 @@ def run_mixflat(output: str, input_files: list) -> bool:
         log(f"mixflat.py failed: {error_msg}", "error")
         return False
 
+    log_fitcheck(result.stdout, names)
     return os.path.exists(output)
 
 
@@ -1752,16 +1768,18 @@ def create_master_flats(flat_groups: dict, master_darks: dict, output_dir: Path,
         user_tmp.mkdir(exist_ok=True)
         temp_dir = Path(tempfile.mkdtemp(prefix="calib_", dir=user_tmp))
         temp_files = []
+        names = {}
 
         try:
             for i, (flat, dark) in enumerate(flats_with_darks):
                 temp_file = temp_dir / f"temp_flat_{i:03d}.fits"
                 if subtract_dark(flat, dark, str(temp_file)):
                     temp_files.append(str(temp_file))
+                    names[str(temp_file)] = flat
                 progress_bar(i + 1, len(flats_with_darks), prefix="    dark-subtracting: ")
 
             if len(temp_files) >= 1:
-                if run_mixflat(str(output_path), temp_files):
+                if run_mixflat(str(output_path), temp_files, names):
                     master_flats[flat_key] = str(output_path)
                     log(f"  Created {output_name}", "info")
                 else:

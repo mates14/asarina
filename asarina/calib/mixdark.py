@@ -59,6 +59,12 @@ def chunk_files(files: list[str], max_per_chunk: int = MAX_FRAMES_PER_CHUNK) -> 
     return chunks
 
 
+def fitcheck_lines(stdout: str) -> list[str]:
+    """The fitcheck.py report in the combine script's output.  The last IRAF
+    prompt has no newline, so a report line may follow it on the same line."""
+    return [l[l.index("fitcheck:"):] for l in stdout.splitlines() if "fitcheck:" in l]
+
+
 def combine_chunk(chunk_files: list[str], output_path: str, chunk_id: int) -> tuple[int, str, bool, str]:
     """
     Combine a single chunk of files using IRAF.
@@ -83,7 +89,9 @@ def combine_chunk(chunk_files: list[str], output_path: str, chunk_id: int) -> tu
         if not os.path.exists(output_path):
             return (chunk_id, output_path, False, "Output file not created")
 
-        return (chunk_id, output_path, True, "")
+        # On success the message carries the frames fitcheck dropped
+        report = "\n".join(fitcheck_lines(result.stdout))
+        return (chunk_id, output_path, True, report)
 
     except subprocess.TimeoutExpired:
         return (chunk_id, output_path, False, "Timeout after 1 hour")
@@ -110,6 +118,8 @@ def combine_final(partial_files: list[str], output_path: str) -> bool:
 
     cmd = [str(IRAF_SCRIPT), abs_output] + abs_files
     result = subprocess.run(cmd, capture_output=True, text=True)
+    for line in fitcheck_lines(result.stdout):
+        print(line)
 
     return result.returncode == 0 and os.path.exists(output_path)
 
@@ -159,6 +169,8 @@ def main():
         if not ok:
             print(f"Error: {err}", file=sys.stderr)
             return 1
+        if err:
+            print(err)
         if args.verbose:
             print(f"Created {args.output}")
         return 0
@@ -194,6 +206,8 @@ def main():
                 if not success:
                     print(f"Error in chunk {chunk_id}: {error}", file=sys.stderr)
                     return 1
+                if error:
+                    print(error)
 
         # Combine partial results
         if args.verbose:
