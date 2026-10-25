@@ -724,7 +724,9 @@ def find_calibration_files(archive_base: str, year: str,
     Handles both the multi-camera layout ({year}/{night}/<camera>/dark[s]/) and
     the single-camera layout ({year}/{night}/dark[s]/), accepts both 'dark' and
     'darks' spellings, the RTS2 target-id convention (00001=dark, 00002=flat),
-    and both '.fits' and Rice-compressed '.fitz' extensions. The path is only a
+    and both '.fits' and Rice-compressed '.fitz' extensions, each possibly
+    bzip2-compressed on top ('.fits.bz2' in the old D50 archive; astropy and
+    cfitsio read those transparently). The path is only a
     hint for where to look; IMAGETYP from the header is the final arbiter
     (compute_stats_parallel filters on it).
     """
@@ -735,7 +737,7 @@ def find_calibration_files(archive_base: str, year: str,
 
     calib_dirs = CALIB_DIR_NAMES[file_type]
     target_id = CALIB_TARGET_IDS[file_type]
-    exts = ("fits", "fitz")
+    exts = ("fits", "fitz", "fits.bz2", "fitz.bz2")
     calib_subdirs = list(calib_dirs) + [target_id]
 
     if layout == "multi":

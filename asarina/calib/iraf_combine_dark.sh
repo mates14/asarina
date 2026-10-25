@@ -45,14 +45,15 @@ trap "rm -rf $tempdir" EXIT
 # Rice tile-compressed (.fitz: empty primary HDU + image in extension 1), which
 # IRAF cannot read. cfitsio's imcopy selects the image HDU and writes it as the
 # output primary; a primary HDU cannot be tile-compressed, so this decompresses.
-# .fitz keep the image in extension [1], plain .fits in the primary [0].
+# .fitz keep the image in extension [1], plain .fits in the primary [0]; a .bz2
+# on top (old D50 archive) is decompressed by cfitsio on the fly.
 # Sequential names avoid collisions between same-named frames from other nights.
 > "$tempdir/files.lst"
 i=0
 for f in "$@"; do
     out=$(printf "in_%05d.fits" "$i")
     case "$f" in
-        *.fitz) sec="[1]" ;;
+        *.fitz|*.fitz.bz2) sec="[1]" ;;
         *)      sec="[0]" ;;
     esac
     imcopy "$f$sec" "$tempdir/$out"
