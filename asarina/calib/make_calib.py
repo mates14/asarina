@@ -554,7 +554,19 @@ CAMERA_FILTERS = {
         # max_median only guards against saturation (~32767).
         "andor3567": {"max_sigma": 4, "max_ma_diff": 1.0,
                       "min_median": None, "max_median": 1000},
-        "fli534": {"max_sigma": 15, "min_median": None, "max_median": None},
+        # D50 FLIs: the row-diff sigma is quantized (whole multiples of 1.0489)
+        # at their ~4-5 ADU noise, so it only catches gross failures. The real
+        # junk - a readout glitch saturating the first ~3% (C0) / ~10% (C1) of
+        # rows, often the first dark of a night, and the residual image that
+        # then decays over ~30 min - keeps median and sigma normal and passes
+        # the pair check, but shows as mean-median skew (glitch 100s-1000s,
+        # residual 3-400, clean 0.1-1). Hot pixels raise the clean skew with
+        # exposure (300 s: fli534 ~4-5, fli25004 ~9), hence ma_diff_per_s.
+        # Bias stays at 4670-4975 (fli534, 2008-2015), 4560-4790 (fli25004).
+        "fli534": {"max_sigma": 12, "max_ma_diff": 2.5, "ma_diff_per_s": 0.015,
+                   "min_median": 4400, "max_median": 5500},
+        "fli25004": {"max_sigma": 12, "max_ma_diff": 2.0, "ma_diff_per_s": 0.04,
+                     "min_median": 4300, "max_median": 5500},
         "fli785": {"max_sigma": 15, "min_median": None, "max_median": None},
         "mi6166": {"max_sigma": 15, "min_median": None, "max_median": None},
         "mi6167": {"max_sigma": 15, "min_median": None, "max_median": None},
@@ -1833,8 +1845,10 @@ def filter_darks_generic(stats_list: list, config: CalibConfig) -> list:
             continue
         # Mean-median skew flags exposed/illuminated frames (sources pull the
         # mean above the median) independently of the unknown bias level.
+        # ma_diff_per_s lets the limit grow with exposure, as hot pixels do.
         if filt.get('max_ma_diff') is not None and s.get('ma_diff') is not None:
-            if s['ma_diff'] > filt['max_ma_diff']:
+            limit = filt['max_ma_diff'] + filt.get('ma_diff_per_s', 0.0) * (s['exptime'] or 0.0)
+            if s['ma_diff'] > limit:
                 drop['skew_high'] += 1
                 continue
         if 'min_median' in filt and filt['min_median'] is not None:
