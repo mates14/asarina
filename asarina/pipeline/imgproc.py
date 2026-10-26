@@ -69,6 +69,7 @@ def _fail(pipeline) -> None:
     """Exit with the code of the pipeline's recorded failure"""
     if pipeline.failure:
         logger.error(f"FAILED: {pipeline.failure}")
+    pipeline.write_failure_summary()
     sys.exit(EXIT_CODES.get(pipeline.failure, 1))
 
 

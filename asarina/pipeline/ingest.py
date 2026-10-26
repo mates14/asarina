@@ -118,6 +118,9 @@ class PhotometryPipeline:
         self.wcs_guess_dir = Path(wcs_guess_dir).expanduser() if wcs_guess_dir else None
         self.used_wcs_guess = False
 
+        # The calibrated frame of the last calibrate(), for the failure summary
+        self.calibrated = None
+
         # Why the last phase failed, None while all went well: 'nodark',
         # 'noflat', 'unreadable', 'notobject' (calibrate), 'nostars',
         # 'nosolve' (solve), 'catalog', 'dophot', 'astqual', 'idnum'
@@ -242,6 +245,8 @@ class PhotometryPipeline:
             result = self._calibrate_standard(image_path, temp_dir)
         logger.info(f"calibrate took {time.time()-t:.3f}s")
 
+        if result is not None:
+            self.calibrated = temp_dir / result
         if result is not None and self.makak_mode:
             cal_path = temp_dir / result
             with fits.open(str(cal_path), mode='update') as hdul:
@@ -594,6 +599,27 @@ class PhotometryPipeline:
 
         except Exception as e:
             logger.warning(f"Could not write daily summary: {e}")
+
+    def write_failure_summary(self) -> None:
+        """Makak: a calibrated frame that failed later goes to mr{YYYYMMDD}f.dat.
+
+        ctime, BGSIGMA, fitted CCD_TEMP and the failure: the sky brightness of
+        a cloudy or moonlit frame, which the nightly graph shows even without a
+        zeropoint (the old makak.py wrote these as "ctime - bgnoise temp").
+        """
+        if not (self.makak_mode and self.daily_summary_dir and self.calibrated
+                and self.calibrated.exists()):
+            return
+        try:
+            hdr = fits.getheader(str(self.calibrated))
+            ctime = float(hdr['CTIME'])
+            datestr = datetime.utcfromtimestamp(ctime - 43200).strftime("%Y%m%d")
+            self.daily_summary_dir.mkdir(parents=True, exist_ok=True)
+            with open(self.daily_summary_dir / f"mr{datestr}f.dat", 'a') as f:
+                f.write(f"{ctime + hdr.get('USEC', 0) / 1e6:.6f} {hdr.get('BGSIGMA', 0):.3f} "
+                        f"{hdr.get('CCD_TEMP', 0):.3f} {self.failure}\n")
+        except Exception as e:
+            logger.warning(f"Could not write failure summary: {e}")
 
     def save_results(self, ecsv_filename: str, temp_dir: Path, ctime: float,
                      keep_image: bool = False) -> Tuple[str, Optional[str]]:
