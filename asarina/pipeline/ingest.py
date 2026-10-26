@@ -46,6 +46,8 @@ class PhotometryPipeline:
                  dophot_refit_zpn: bool = False,
                  dophot_zpn_from_camera: bool = False,
                  dophot_filter_terms: dict = None,
+                 # Fixed camera: start from the last solution instead of solving
+                 wcs_guess_dir: str = None,
                  # Makak-mode bundle
                  makak_mode: bool = False):
 
@@ -104,6 +106,17 @@ class PhotometryPipeline:
         #   - -k flag in pyrt-dophot
         #   - camera crop for mi0315 in smart_dark path
         self.makak_mode = makak_mode
+
+        # A fixed camera sees the same alt-az field all the time, so its last
+        # good WCS, turned in RA by the sidereal angle since, is a solution
+        # for the next frame - good to the drift of the mount-less camera and
+        # refraction, well inside what pyrt-dophot's refit pulls in.  That
+        # skips pyrt-field-solve, and with it the minutes it spends failing
+        # on a cloudy frame.  A guess the refit rejects falls back to
+        # field-solve (field_solve()), and every accepted solution becomes
+        # the next guess, so a moved camera heals itself.
+        self.wcs_guess_dir = Path(wcs_guess_dir).expanduser() if wcs_guess_dir else None
+        self.used_wcs_guess = False
 
         # Why the last phase failed, None while all went well: 'nodark',
         # 'noflat', 'unreadable', 'notobject' (calibrate), 'nostars',
@@ -264,7 +277,13 @@ class PhotometryPipeline:
             return False
         logger.info(f"pyrt-phcat took {time.time()-t:.3f}s")
 
-        # Astrometric solve
+        if self._apply_wcs_guess(temp_dir / fits_file):
+            return True
+        return self.field_solve(fits_file, temp_dir)
+
+    def field_solve(self, fits_file: str, temp_dir: Path) -> bool:
+        """Blind astrometric solve with pyrt-field-solve (after pyrt-phcat)."""
+        self.used_wcs_guess = False
         scale = self.pixel_scale
         if scale is None and self.makak_mode:
             scale = 55.0
@@ -406,6 +425,10 @@ class PhotometryPipeline:
         logger.info(f"Solution quality ok: ASTQUAL={qual} ASTCOVER={meta.get('ASTCOVER')}"
                     f" ASTSIGMA={meta.get('ASTSIGMA')} IDNUM={idnum}")
 
+        solved = temp_dir / fits_file.replace('.fits', 't.fits')
+        if self.wcs_guess_dir is not None and solved.exists():
+            self._store_wcs_guess(solved)
+
         return ecsv_file
 
     def _dophot_passes(self, dophot_base: List[str], temp_dir: Path, ecsv_file: str,
@@ -455,6 +478,72 @@ class PhotometryPipeline:
                 logger.error(f"ECSV {ecsv_file} missing after pyrt-dophot pass {pass_num}")
                 return False
         return True
+
+    # Sidereal rotation of the sky, degrees of RA per second of time
+    SIDEREAL_DEG_PER_S = 360.98564736629 / 86400.0
+    # WCS keywords carried from one frame's solution to the next
+    _WCS_GUESS_KEYS = ('WCSAXES', 'CTYPE', 'CUNIT', 'CRVAL', 'CRPIX', 'CD1_', 'CD2_',
+                       'PV1_', 'PV2_', 'LONPOLE', 'LATPOLE', 'RADESYS', 'EQUINOX',
+                       'A_', 'B_', 'AP_', 'BP_')
+
+    def _wcs_guess_file(self, header) -> Optional[Path]:
+        if self.wcs_guess_dir is None:
+            return None
+        from pyrt.utils.chip_id import get_camera_id
+        return self.wcs_guess_dir / f"{get_camera_id(header)}.wcs"
+
+    def _apply_wcs_guess(self, fits_path: Path) -> bool:
+        """Put the last good solution, turned to this frame's time, into fits_path."""
+        self.used_wcs_guess = False
+        if self.wcs_guess_dir is None:
+            return False
+        try:
+            with fits.open(str(fits_path), mode='update') as hdul:
+                hdr = hdul[0].header
+                guess_file = self._wcs_guess_file(hdr)
+                if guess_file is None or not guess_file.exists():
+                    return False
+                guess = fits.Header.fromtextfile(str(guess_file))
+                dt = float(hdr['CTIME']) + hdr.get('USEC', 0) / 1e6 - float(guess['GUESSCT'])
+                for key in list(guess.keys()):
+                    if key.startswith(self._WCS_GUESS_KEYS):
+                        hdr[key] = guess[key]
+                hdr['CRVAL1'] = (float(guess['CRVAL1']) + dt * self.SIDEREAL_DEG_PER_S) % 360.0
+                hdul.flush()
+        except Exception as e:
+            logger.warning(f"WCS guess not applied: {e}")
+            return False
+        self.used_wcs_guess = True
+        logger.info(f"WCS guess from {guess_file.name}, {dt:.0f}s old: "
+                    f"CRVAL={hdr['CRVAL1']:.4f},{hdr['CRVAL2']:.4f}")
+        return True
+
+    def _store_wcs_guess(self, solved_path: Path) -> None:
+        """Keep solved_path's WCS as the guess for later frames (newest one wins)."""
+        try:
+            hdr = fits.getheader(str(solved_path))
+            guess_file = self._wcs_guess_file(hdr)
+            if guess_file is None:
+                return
+            ctime = float(hdr['CTIME']) + hdr.get('USEC', 0) / 1e6
+            out = fits.Header()
+            out['GUESSCT'] = (ctime, 'CTIME of the frame this WCS solves')
+            for card in hdr.cards:
+                if card.keyword.startswith(self._WCS_GUESS_KEYS):
+                    out.append(card)
+            guess_file.parent.mkdir(parents=True, exist_ok=True)
+            # Parallel workers finish out of order: the lock keeps an older
+            # frame from replacing a newer frame's solution.
+            with open(guess_file.with_suffix('.lock'), 'w') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                if guess_file.exists():
+                    if float(fits.Header.fromtextfile(str(guess_file))['GUESSCT']) >= ctime:
+                        return
+                tmp = guess_file.with_suffix('.tmp')
+                out.totextfile(str(tmp), overwrite=True)
+                os.replace(tmp, guess_file)
+        except Exception as e:
+            logger.warning(f"WCS guess not stored: {e}")
 
     @staticmethod
     def _astqual(ecsv_path: Path) -> Optional[str]:
@@ -649,6 +738,11 @@ class PhotometryPipeline:
                 return None
 
             ecsv = self.photometry(fits_file, temp_dir)
+            if ecsv is None and self.used_wcs_guess:
+                logger.warning(f"Rejected from the WCS guess ({self.failure}), field-solving")
+                self.failure = None
+                if self.field_solve(fits_file, temp_dir):
+                    ecsv = self.photometry(fits_file, temp_dir)
             if ecsv is None:
                 return None
 

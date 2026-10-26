@@ -493,6 +493,10 @@ def main():
     solve = parser.add_argument_group('astrometric solve')
     solve.add_argument('--pixel-scale', type=float, metavar='ARCSEC',
                        help='Pixel scale hint for pyrt-field-solve (arcsec/px)')
+    solve.add_argument('--wcs-guess', metavar='DIR', dest='wcs_guess_dir',
+                       help='Fixed camera: start from the last good solution kept in DIR, '
+                            'turned by the sidereal angle, instead of pyrt-field-solve '
+                            '(which remains the fallback)')
 
     phot = parser.add_argument_group('photometry')
     phot.add_argument('--dophot-model', metavar='FILE')
@@ -606,8 +610,16 @@ def main():
         dophot_refit_zpn=args.refit_zpn,
         dophot_zpn_from_camera=args.zpn_from_camera,
         dophot_filter_terms=filter_terms(cfg),
+        wcs_guess_dir=args.wcs_guess_dir,
         makak_mode=args.makak,
     )
+
+    # Makak takes its darks in the same stream, shutter closed (slitposx < 0.5).
+    # They only feed the nightly dark statistics: sent on to the solve, each
+    # one sits in pyrt-field-solve for minutes before failing.
+    if args.makak and float(raw_header.get('SLITPOSX', 1.0)) < 0.5:
+        pipeline._process_makak_dark(raw_path)
+        sys.exit(0)
 
     if not args.force:
         existing = pipeline._check_existing_ecsv(str(raw_path))
@@ -717,6 +729,11 @@ def main():
 
         # 6. Refined photometry (as mates)
         ecsv = pipeline.photometry(fits_file, temp_dir, sip=args.sip, passes=args.passes)
+        if ecsv is None and pipeline.used_wcs_guess:
+            logger.warning(f"Rejected from the WCS guess ({pipeline.failure}), field-solving")
+            pipeline.failure = None
+            if pipeline.field_solve(fits_file, temp_dir):
+                ecsv = pipeline.photometry(fits_file, temp_dir, sip=args.sip, passes=args.passes)
         if ecsv is None:
             _fail(pipeline)
 

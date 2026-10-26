@@ -26,7 +26,13 @@ Recognised keys (underscores or dashes interchangeable):
   phdb_root         str    /home/mates/phdb  ECSV output root
   phdb_date_fmt     str    %y%m   strftime of the ECSV subdirectory
   phdb_by_night     bool   false  date it by the night (UT - 12 h), not local time
+  no_raw_update     bool   false  never write the WCS into the raw image (archive
+                                  not writable by the pipeline user)
+  png_root          str    /home/mates/png
+  daily_summary_dir str           nightly mr{YYYYMMDD}.dat summaries (Makak)
   smart_dark        str
+  wcs_guess_dir     str           fixed camera: last good WCS kept here is the next
+                                  frame's solution, turned by the sidereal angle
   stat_dir          str
   model_file        str
   ssh_key           str
@@ -69,7 +75,7 @@ USER_CONFIG_FILE   = '~/.config/asarina/config'
 # comparison; for a bool it is worse and silent, since "false" is a non-empty
 # string and therefore true.  Add new typed options here as they appear.
 _BOOL_KEYS  = frozenset({'sbt_window_patch', 'makak', 'refit_zpn', 'zpn_from_camera',
-                         'phdb_by_night'})
+                         'phdb_by_night', 'no_raw_update'})
 _INT_KEYS   = frozenset({'sip', 'passes', 'dophot_idlimit', 'dophot_max_stars', 'dophot_workers',
                          'db_min_idnum'})
 _FLOAT_KEYS = frozenset({'pixel_scale', 'dophot_maglim', 'dophot_enlarge',
