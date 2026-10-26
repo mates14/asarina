@@ -87,7 +87,25 @@ find /storage/archive-images/MAKAK/images -name '*.fits' | sort | \
 
 Already-processed files are skipped automatically (unless `-f`/`--force`).
 
-## Real-time daemon (replaces `makak-reloaded` live mode)
+## Real-time service (config-driven)
+
+The settings below are kept in a config file, and `asarina-watch` runs it as a
+service: see `~/asarina+makak` (`etc/asarina.conf`,
+`systemd/makak-asarina.service`).  In short:
+
+```bash
+asarina-watch --search-root /images --camera-pattern "" \
+  --config ~/asarina+makak/etc/asarina.conf \
+  --latest-only --max-workers 3 --min-age 1 --frame-timeout 180
+```
+
+Two config keys beyond the flags here: `zpn_from_camera = true` starts the refit
+from pyrt's mi0315 ZPN model, and `wcs_guess_dir` turns the last accepted WCS by
+the sidereal angle into the next frame's solution, so field-solve runs only as
+a fallback.  Frames coming faster than they can be processed are dropped,
+oldest first (`--latest-only`).
+
+## Real-time daemon, flags only (older form)
 
 ```bash
 asarina-watch \
