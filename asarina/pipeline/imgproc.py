@@ -496,6 +496,8 @@ def main():
                        help='Detection FWHM for pyrt-phcat instead of its estimate from the frame')
     solve.add_argument('--phcat-back-size', type=int, metavar='PX',
                        help='pyrt-phcat background mesh (pyrt default 256)')
+    solve.add_argument('--phcat-aperture', type=float, metavar='PX',
+                       help='Fixed aperture radius for pyrt-phcat instead of one from the FWHM')
     solve.add_argument('--pixel-scale', type=float, metavar='ARCSEC',
                        help='Pixel scale hint for pyrt-field-solve (arcsec/px)')
     solve.add_argument('--wcs-guess', metavar='DIR', dest='wcs_guess_dir',
@@ -611,6 +613,7 @@ def main():
         pixel_scale=args.pixel_scale,
         phcat_fwhm=args.phcat_fwhm,
         phcat_back_size=args.phcat_back_size,
+        phcat_aperture=args.phcat_aperture,
         dophot_model=args.dophot_model,
         dophot_catalog=args.dophot_catalog,
         dophot_maglim=args.dophot_maglim,

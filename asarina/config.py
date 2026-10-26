@@ -17,6 +17,7 @@ Recognised keys (underscores or dashes interchangeable):
   phcat_fwhm        float         fixed detection FWHM in px instead of the estimate
                                   from the frame (lit clouds pass for 50 px stars)
   phcat_back_size   int           SExtractor background mesh in px (pyrt: 256)
+  phcat_aperture    float         fixed aperture radius in px (pyrt: sqrt(FWHM^2+1.5^2))
   makak             bool   false
   dophot_model      str
   dophot_catalog    str
@@ -84,7 +85,7 @@ _BOOL_KEYS  = frozenset({'sbt_window_patch', 'makak', 'refit_zpn', 'zpn_from_cam
                          'phdb_by_night', 'no_raw_update', 'wcs_guess_keep'})
 _INT_KEYS   = frozenset({'sip', 'passes', 'dophot_idlimit', 'dophot_max_stars', 'dophot_workers',
                          'db_min_idnum', 'phcat_back_size', 'min_idnum'})
-_FLOAT_KEYS = frozenset({'pixel_scale', 'phcat_fwhm', 'dophot_maglim', 'dophot_enlarge',
+_FLOAT_KEYS = frozenset({'pixel_scale', 'phcat_fwhm', 'phcat_aperture', 'dophot_maglim', 'dophot_enlarge',
                           'gain', 'readnoise', 'ape', 'default_fwhm', 'zp_r', 'db_max_fwhm'})
 
 
