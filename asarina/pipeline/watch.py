@@ -41,9 +41,14 @@ class FileMonitor:
                  camera_pattern: str = "C0",
                  file_pattern: str = "2*.fits",
                  exclude_patterns: List[str] = None,
-                 poll_interval: float = 1.0):
+                 poll_interval: float = 1.0,
+                 min_age: float = 0.0):
         
         self.search_root = Path(search_root)
+        # Seconds a file must sit unmodified before it is taken: where the
+        # camera writes straight into the archive (Makak), the newest file may
+        # still be growing.
+        self.min_age = min_age
         self.camera_pattern = camera_pattern
         self.file_pattern = file_pattern
         self.exclude_patterns = exclude_patterns or ["dark", "flat", "bad", "queue"]
@@ -108,6 +113,12 @@ class FileMonitor:
             
             logger.debug(f"After filtering: {len(filtered_files)} files")
             
+            if self.min_age > 0:
+                settled = time.time() - self.min_age
+                filtered_files = [f for f in filtered_files if f.stat().st_mtime <= settled]
+                if not filtered_files:
+                    return None
+
             # Return most recent by modification time
             latest_file = max(filtered_files, key=lambda p: p.stat().st_mtime)
             logger.debug(f"Latest file: {latest_file}")
@@ -146,8 +157,17 @@ class AutomatedPipeline:
     """File-watching daemon: detects new images and hands each to asarina-imgproc."""
 
     def __init__(self, use_systemd=False, png_cleanup_days=7, cleanup_interval_hours=6,
-                 max_workers=3, imgproc_base=None):
+                 max_workers=3, imgproc_base=None, latest_only=False, frame_timeout=None):
         self.imgproc_base = imgproc_base or ['asarina-imgproc']
+        # latest_only: with all workers busy, a new frame replaces the one
+        # waiting instead of queueing behind it.  For a camera whose cadence
+        # outruns the processing (Makak, 10 s frames) the queue would otherwise
+        # only grow, and the night's results lag further behind every hour.
+        self.latest_only = latest_only
+        self.frame_timeout = frame_timeout
+        self._slot_lock = threading.Lock()
+        self._busy = 0
+        self._pending = None
         self.monitor = FileMonitor()
         self.process_queue = queue.Queue()
         self.health_checker = HealthChecker()
@@ -248,7 +268,19 @@ class AutomatedPipeline:
                 self._notify_systemd_status(f"Processing {Path(image_path).name}")
                 
                 # Submit to processing pool
-                future = self.processing_pool.submit(self._process_single_image, image_path)
+                if self.latest_only:
+                    with self._slot_lock:
+                        if self._busy >= self.max_workers:
+                            if self._pending is not None:
+                                self.logger.info(f"Skipping {Path(self._pending).name}, "
+                                                 f"superseded by {Path(image_path).name}")
+                            self._pending = image_path
+                            self.process_queue.task_done()
+                            continue
+                        self._busy += 1
+                    self.processing_pool.submit(self._run_slot, image_path)
+                else:
+                    self.processing_pool.submit(self._process_single_image, image_path)
                 
                 # Mark task as received (actual processing happens in thread pool)
                 self.process_queue.task_done()
@@ -259,17 +291,44 @@ class AutomatedPipeline:
                 self.logger.error(f"Processor worker error: {e}")
                 self.health_checker.record_error()
     
+    def _run_slot(self, image_path: str):
+        """latest_only worker: process the frame, then whichever one is waiting."""
+        while image_path is not None:
+            self._process_single_image(image_path)
+            with self._slot_lock:
+                image_path, self._pending = self._pending, None
+                if image_path is None:
+                    self._busy -= 1
+
     def _process_single_image(self, image_path: str):
         """Process a single image by invoking asarina-imgproc (runs in thread pool)."""
         cmd = self.imgproc_base + [image_path]
+        t = time.time()
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                self.logger.info(f"✓ Completed {Path(image_path).name}")
+            # Own session, so that a timeout takes imgproc's children
+            # (pyrt-field-solve on a cloudy frame) down with it.
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True,
+                                    start_new_session=True)
+            try:
+                _, stderr = proc.communicate(timeout=self.frame_timeout)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    _, stderr = proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    _, stderr = proc.communicate()
+                self.logger.error(f"✗ Timeout {Path(image_path).name} "
+                                  f"after {self.frame_timeout:.0f}s")
+                self.health_checker.record_error()
+                return
+            if proc.returncode == 0:
+                self.logger.info(f"✓ Completed {Path(image_path).name} ({time.time() - t:.1f}s)")
                 self.health_checker.record_activity()
             else:
-                self.logger.error(f"✗ Failed {Path(image_path).name} (exit {result.returncode})")
-                for line in result.stderr.splitlines()[-10:]:
+                self.logger.error(f"✗ Failed {Path(image_path).name} (exit {proc.returncode})")
+                for line in stderr.splitlines()[-10:]:
                     self.logger.error(f"  {line}")
                 self.health_checker.record_error()
         except Exception as e:
@@ -343,7 +402,7 @@ class AutomatedPipeline:
         # Shutdown processing pool gracefully
         if self.processing_pool:
             self.logger.info("Shutting down processing pool...")
-            self.processing_pool.shutdown(wait=True, timeout=30)
+            self.processing_pool.shutdown(wait=True, cancel_futures=True)
         
         if self.use_systemd:
             daemon.notify('STOPPING=1')
@@ -382,15 +441,33 @@ def main():
                         help='Print health status and exit')
     parser.add_argument('-v', '--verbose', action='store_true')
 
-    # Forwarded verbatim to asarina-imgproc
+    parser.add_argument('--latest-only', action='store_true',
+                        help='With all workers busy, a new frame replaces the waiting one '
+                             'instead of queueing (cameras whose cadence outruns processing)')
+    parser.add_argument('--min-age', type=float, default=0.0, metavar='S',
+                        help='Take a file only once unmodified for S seconds (camera '
+                             'writing straight into the archive; default 0)')
+    parser.add_argument('--frame-timeout', type=float, metavar='S',
+                        help='Kill an imgproc run after S seconds (default: no limit)')
+
+    # Forwarded verbatim to asarina-imgproc, and only when given: anything left
+    # unset is up to imgproc - its config file (--config, or /etc/asarina/config
+    # and ~/.config/asarina/config), then its own defaults.
     fwd = parser.add_argument_group('forwarded to asarina-imgproc')
-    fwd.add_argument('--ssh-key', required=True,
-                     help='Path to SSH private key for database upload')
+    fwd.add_argument('--config', metavar='FILE',
+                     help='asarina config file for imgproc (replaces the default cascade)')
+    fwd.add_argument('--camera', metavar='NAME',
+                     help='Config section for imgproc (default: CCD_NAME of each frame)')
+    fwd.add_argument('--ssh-key',
+                     help='Path to SSH private key for database upload (no upload if omitted)')
     fwd.add_argument('--realtime', action='store_true',
                      help='Pass --realtime to imgproc (web preview, corrwerr, WCS-to-raw)')
-    fwd.add_argument('--phdb-root', default='~/phdb')
-    fwd.add_argument('--phdb-date-fmt', default='%y%m', metavar='FMT')
-    fwd.add_argument('--png-root', default='~/png')
+    fwd.add_argument('--no-raw-update', action='store_true',
+                     help='Pass --no-raw-update to imgproc (archive not writable)')
+    fwd.add_argument('--phdb-root')
+    fwd.add_argument('--phdb-date-fmt', metavar='FMT')
+    fwd.add_argument('--phdb-by-night', action='store_true')
+    fwd.add_argument('--png-root')
     fwd.add_argument('--daily-summary', metavar='DIR', dest='daily_summary_dir')
     fwd.add_argument('--stat-dir', metavar='DIR', dest='stat_dir',
                      help='Directory for per-night photometric stat ECSVs')
@@ -402,11 +479,12 @@ def main():
     fwd.add_argument('--dophot-enlarge', type=float, metavar='N')
     fwd.add_argument('--dophot-terms', metavar='TERMS')
     fwd.add_argument('--dophot-idlimit', type=int, metavar='N')
-    fwd.add_argument('--dophot-max-stars', type=int, default=1000, metavar='N')
+    fwd.add_argument('--dophot-max-stars', type=int, metavar='N')
+    fwd.add_argument('--dophot-workers', type=int, metavar='N')
     fwd.add_argument('--makak', action='store_true', dest='makak_mode',
                      help='Enable Makak-specific features')
-    fwd.add_argument('--sip', type=int, default=1, metavar='N')
-    fwd.add_argument('--passes', type=int, default=2, metavar='N')
+    fwd.add_argument('--sip', type=int, metavar='N')
+    fwd.add_argument('--passes', type=int, metavar='N')
     fwd.add_argument('--sbt-window-patch', action='store_true')
     fwd.add_argument('-f', '--force', action='store_true',
                      help='Reprocess images even if ECSV already exists')
@@ -420,44 +498,28 @@ def main():
         sys.exit(0)
 
     # Build the base imgproc command that will be prepended to each image path
-    imgproc_base = ['asarina-imgproc',
-                    '--ssh-key', args.ssh_key,
-                    '--phdb-root', args.phdb_root,
-                    '--phdb-date-fmt', args.phdb_date_fmt,
-                    '--png-root', args.png_root,
-                    '--dophot-max-stars', str(args.dophot_max_stars),
-                    '--sip', str(args.sip),
-                    '--passes', str(args.passes)]
-    if args.realtime:
-        imgproc_base += ['--realtime']
-    if args.daily_summary_dir:
-        imgproc_base += ['--daily-summary', args.daily_summary_dir]
-    if args.stat_dir:
-        imgproc_base += ['--stat-dir', args.stat_dir]
-    if args.smart_dark_calib:
-        imgproc_base += ['--smart-dark', args.smart_dark_calib]
-    if args.pixel_scale:
-        imgproc_base += ['--pixel-scale', str(args.pixel_scale)]
-    if args.dophot_model:
-        imgproc_base += ['--dophot-model', args.dophot_model]
-    if args.dophot_catalog:
-        imgproc_base += ['--dophot-catalog', args.dophot_catalog]
-    if args.dophot_maglim:
-        imgproc_base += ['--dophot-maglim', str(args.dophot_maglim)]
-    if args.dophot_enlarge:
-        imgproc_base += ['--dophot-enlarge', str(args.dophot_enlarge)]
-    if args.dophot_terms:
-        imgproc_base += ['--dophot-terms', args.dophot_terms]
-    if args.dophot_idlimit:
-        imgproc_base += ['--dophot-idlimit', str(args.dophot_idlimit)]
-    if args.makak_mode:
-        imgproc_base += ['--makak']
-    if args.sbt_window_patch:
-        imgproc_base += ['--sbt-window-patch']
-    if args.force:
-        imgproc_base += ['-f']
-    if args.verbose:
-        imgproc_base += ['-v']
+    imgproc_base = ['asarina-imgproc']
+    for opt, dest in [('--config', 'config'), ('--camera', 'camera'),
+                      ('--ssh-key', 'ssh_key'),
+                      ('--phdb-root', 'phdb_root'), ('--phdb-date-fmt', 'phdb_date_fmt'),
+                      ('--png-root', 'png_root'),
+                      ('--daily-summary', 'daily_summary_dir'), ('--stat-dir', 'stat_dir'),
+                      ('--smart-dark', 'smart_dark_calib'), ('--pixel-scale', 'pixel_scale'),
+                      ('--dophot-model', 'dophot_model'), ('--dophot-catalog', 'dophot_catalog'),
+                      ('--dophot-maglim', 'dophot_maglim'), ('--dophot-enlarge', 'dophot_enlarge'),
+                      ('--dophot-terms', 'dophot_terms'), ('--dophot-idlimit', 'dophot_idlimit'),
+                      ('--dophot-max-stars', 'dophot_max_stars'),
+                      ('--dophot-workers', 'dophot_workers'),
+                      ('--sip', 'sip'), ('--passes', 'passes')]:
+        val = getattr(args, dest)
+        if val is not None:
+            imgproc_base += [opt, str(val)]
+    for opt, dest in [('--realtime', 'realtime'), ('--no-raw-update', 'no_raw_update'),
+                      ('--phdb-by-night', 'phdb_by_night'), ('--makak', 'makak_mode'),
+                      ('--sbt-window-patch', 'sbt_window_patch'), ('-f', 'force'),
+                      ('-v', 'verbose')]:
+        if getattr(args, dest):
+            imgproc_base.append(opt)
 
     watcher = AutomatedPipeline(
         use_systemd=args.systemd,
@@ -465,10 +527,13 @@ def main():
         cleanup_interval_hours=args.cleanup_interval_hours,
         max_workers=args.max_workers,
         imgproc_base=imgproc_base,
+        latest_only=args.latest_only,
+        frame_timeout=args.frame_timeout,
     )
     watcher.monitor.search_root = Path(args.search_root)
     watcher.monitor.camera_pattern = args.camera_pattern
     watcher.monitor.poll_interval = args.poll_interval
+    watcher.monitor.min_age = args.min_age
 
     logger.info(f"Starting watcher, imgproc base: {' '.join(imgproc_base)}")
     if args.systemd:
