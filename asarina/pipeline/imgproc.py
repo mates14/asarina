@@ -492,15 +492,24 @@ def main():
                        help='Per-pixel dark model (.npy); bypasses master dark+flat')
 
     solve = parser.add_argument_group('astrometric solve')
+    solve.add_argument('--phcat-fwhm', type=float, metavar='PX',
+                       help='Detection FWHM for pyrt-phcat instead of its estimate from the frame')
+    solve.add_argument('--phcat-back-size', type=int, metavar='PX',
+                       help='pyrt-phcat background mesh (pyrt default 256)')
     solve.add_argument('--pixel-scale', type=float, metavar='ARCSEC',
                        help='Pixel scale hint for pyrt-field-solve (arcsec/px)')
     solve.add_argument('--wcs-guess', metavar='DIR', dest='wcs_guess_dir',
                        help='Fixed camera: start from the last good solution kept in DIR, '
                             'turned by the sidereal angle, instead of pyrt-field-solve '
                             '(which remains the fallback)')
+    solve.add_argument('--wcs-guess-keep', action='store_true',
+                       help='When the refit from the WCS guess is not verified (clouds: stars '
+                            'do not cover the chip), photometry on the guess as it is')
 
     phot = parser.add_argument_group('photometry')
     phot.add_argument('--dophot-model', metavar='FILE')
+    phot.add_argument('--min-idnum', type=int, default=20, metavar='N',
+                      help='Reject frames with at most N matched stars (default 20)')
     phot.add_argument('--dophot-catalog', metavar='NAME')
     phot.add_argument('--dophot-maglim', type=float, metavar='N')
     phot.add_argument('--dophot-enlarge', type=float, metavar='N')
@@ -600,6 +609,8 @@ def main():
         stat_dir=args.stat_dir,
         smart_dark_calib=args.smart_dark,
         pixel_scale=args.pixel_scale,
+        phcat_fwhm=args.phcat_fwhm,
+        phcat_back_size=args.phcat_back_size,
         dophot_model=args.dophot_model,
         dophot_catalog=args.dophot_catalog,
         dophot_maglim=args.dophot_maglim,
@@ -612,6 +623,8 @@ def main():
         dophot_zpn_from_camera=args.zpn_from_camera,
         dophot_filter_terms=filter_terms(cfg),
         wcs_guess_dir=args.wcs_guess_dir,
+        wcs_guess_keep=args.wcs_guess_keep,
+        min_idnum=args.min_idnum,
         makak_mode=args.makak,
     )
 

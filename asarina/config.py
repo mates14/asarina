@@ -14,6 +14,9 @@ Recognised keys (underscores or dashes interchangeable):
   sip               int    1
   passes            int    2
   pixel_scale       float
+  phcat_fwhm        float         fixed detection FWHM in px instead of the estimate
+                                  from the frame (lit clouds pass for 50 px stars)
+  phcat_back_size   int           SExtractor background mesh in px (pyrt: 256)
   makak             bool   false
   dophot_model      str
   dophot_catalog    str
@@ -33,6 +36,9 @@ Recognised keys (underscores or dashes interchangeable):
   smart_dark        str
   wcs_guess_dir     str           fixed camera: last good WCS kept here is the next
                                   frame's solution, turned by the sidereal angle
+  wcs_guess_keep    bool   false  an unverified refit from the guess (clouds) falls
+                                  back to photometry on the guess as it is
+  min_idnum         int    20     reject frames with at most this many matched stars
   stat_dir          str
   model_file        str
   ssh_key           str
@@ -75,10 +81,10 @@ USER_CONFIG_FILE   = '~/.config/asarina/config'
 # comparison; for a bool it is worse and silent, since "false" is a non-empty
 # string and therefore true.  Add new typed options here as they appear.
 _BOOL_KEYS  = frozenset({'sbt_window_patch', 'makak', 'refit_zpn', 'zpn_from_camera',
-                         'phdb_by_night', 'no_raw_update'})
+                         'phdb_by_night', 'no_raw_update', 'wcs_guess_keep'})
 _INT_KEYS   = frozenset({'sip', 'passes', 'dophot_idlimit', 'dophot_max_stars', 'dophot_workers',
-                         'db_min_idnum'})
-_FLOAT_KEYS = frozenset({'pixel_scale', 'dophot_maglim', 'dophot_enlarge',
+                         'db_min_idnum', 'phcat_back_size', 'min_idnum'})
+_FLOAT_KEYS = frozenset({'pixel_scale', 'phcat_fwhm', 'dophot_maglim', 'dophot_enlarge',
                           'gain', 'readnoise', 'ape', 'default_fwhm', 'zp_r', 'db_max_fwhm'})
 
 

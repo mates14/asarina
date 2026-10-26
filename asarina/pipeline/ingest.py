@@ -35,6 +35,8 @@ class PhotometryPipeline:
                  daily_summary_dir: str = None,
                  stat_dir: str = None,
                  # Photometry overrides
+                 phcat_fwhm: float = None,
+                 phcat_back_size: int = None,
                  dophot_model: str = None,
                  dophot_catalog: str = None,
                  dophot_maglim: float = None,
@@ -48,6 +50,8 @@ class PhotometryPipeline:
                  dophot_filter_terms: dict = None,
                  # Fixed camera: start from the last solution instead of solving
                  wcs_guess_dir: str = None,
+                 wcs_guess_keep: bool = False,
+                 min_idnum: int = 20,
                  # Makak-mode bundle
                  makak_mode: bool = False):
 
@@ -58,6 +62,8 @@ class PhotometryPipeline:
 
         self.smart_dark_calib = smart_dark_calib
         self.pixel_scale = pixel_scale
+        self.phcat_fwhm = phcat_fwhm
+        self.phcat_back_size = phcat_back_size
         self.phdb_date_fmt = phdb_date_fmt
         # Date the phdb subdirectory by the night (UT - 12 h, as the RTS2
         # archive does) rather than by the local calendar date, so that a
@@ -117,6 +123,8 @@ class PhotometryPipeline:
         # the next guess, so a moved camera heals itself.
         self.wcs_guess_dir = Path(wcs_guess_dir).expanduser() if wcs_guess_dir else None
         self.used_wcs_guess = False
+        self.wcs_guess_keep = wcs_guess_keep
+        self.min_idnum = min_idnum
 
         # The calibrated frame of the last calibrate(), for the failure summary
         self.calibrated = None
@@ -268,8 +276,13 @@ class PhotometryPipeline:
         """
         # Source detection
         t = time.time()
+        phcat_cmd = ["pyrt-phcat"]
+        if self.phcat_fwhm is not None:
+            phcat_cmd += ["-f", str(self.phcat_fwhm)]
+        if self.phcat_back_size is not None:
+            phcat_cmd += ["--back-size", str(self.phcat_back_size)]
         ret = subprocess.run(
-            ["pyrt-phcat", fits_file],
+            phcat_cmd + [fits_file],
             cwd=str(temp_dir), capture_output=True, text=True,
         )
         if ret.returncode != 0:
@@ -415,7 +428,19 @@ class PhotometryPipeline:
                 return None
             qual = self._astqual(temp_dir / ecsv_file)
 
-        if qual != 'OK':
+        # Fixed camera through clouds: the stars do not cover the chip and the
+        # refit cannot be verified, but the guess is the last verified solution
+        # turned by the sidereal angle.  Photometry on it as it is, no refit;
+        # the ECSV then has no ASTQUAL and the guess is not updated from it.
+        if qual != 'OK' and self.wcs_guess_keep and self.used_wcs_guess:
+            logger.warning(f"ASTQUAL={qual}, photometry on the WCS guess as it is")
+            # the refit's frame would pass for the solution downstream
+            (temp_dir / fits_file.replace('.fits', 't.fits')).unlink(missing_ok=True)
+            if not self._dophot_passes([a for a in dophot_base if a != "-a"], temp_dir,
+                                       ecsv_file, [det_file], 0, False):
+                return None
+            qual = None
+        elif qual != 'OK':
             self.failure = 'astqual'
             logger.error(f"ASTQUAL={qual} — rejecting solution")
             return None
@@ -423,15 +448,15 @@ class PhotometryPipeline:
         from astropy.table import Table
         meta = Table.read(str(temp_dir / ecsv_file), format='ascii.ecsv').meta
         idnum = meta.get('IDNUM')
-        if idnum is None or int(idnum) <= 20:
+        if idnum is None or int(idnum) <= self.min_idnum:
             self.failure = 'idnum'
-            logger.error(f"IDNUM={idnum} <= 20 — rejecting solution")
+            logger.error(f"IDNUM={idnum} <= {self.min_idnum} — rejecting solution")
             return None
         logger.info(f"Solution quality ok: ASTQUAL={qual} ASTCOVER={meta.get('ASTCOVER')}"
                     f" ASTSIGMA={meta.get('ASTSIGMA')} IDNUM={idnum}")
 
         solved = temp_dir / fits_file.replace('.fits', 't.fits')
-        if self.wcs_guess_dir is not None and solved.exists():
+        if self.wcs_guess_dir is not None and qual == 'OK' and solved.exists():
             self._store_wcs_guess(solved)
 
         return ecsv_file
