@@ -329,7 +329,8 @@ def _resample(tile_hdr, fwcs, flux, sigma_scale, edge_px):
 
 
 def _add_to_tile(path, hdr, frame, y0, x0, wf, w):
-    """Add the frame's w*flux and w at (y0, x0) of the tile, under a lock"""
+    """Add the frame's w*flux and w at (y0, x0) of the tile, under a lock;
+    frame is a name, or the list of names of another map's tile (merge)"""
     from astropy.io import fits
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path.with_suffix('.lock'), 'a') as lock:
@@ -337,7 +338,7 @@ def _add_to_tile(path, hdr, frame, y0, x0, wf, w):
         if path.exists():
             with fits.open(path) as hdul:
                 frames = list(hdul['FRAMES'].data['NAME'])
-                if frame in frames:
+                if (frame in frames if isinstance(frame, str) else set(frame) & set(frames)):
                     return False
                 total = hdul[0].data.astype(np.float32)
                 weight = hdul['WEIGHT'].data.astype(np.float32)
@@ -350,7 +351,7 @@ def _add_to_tile(path, hdr, frame, y0, x0, wf, w):
         ny, nx = w.shape
         total[y0:y0 + ny, x0:x0 + nx] += wf
         weight[y0:y0 + ny, x0:x0 + nx] += w
-        frames.append(frame)
+        frames += [frame] if isinstance(frame, str) else list(frame)
         hdr['NFRAMES'] = len(frames)
         hdul = fits.HDUList([
             fits.PrimaryHDU(total, header=hdr),
@@ -432,6 +433,28 @@ def add_frame(fits_path, ecsv_path, mapdir, prof=SBT):
     return added
 
 
+def merge(srcdir, mapdir, bands):
+    """Add the tiles of another map (e.g. built elsewhere from an archive night)
+    to this one; a tile that shares a frame with its counterpart is left out.
+    (merged, skipped)"""
+    from astropy.io import fits
+    merged = skipped = 0
+    for band in bands:
+        for path in sorted((Path(srcdir) / band).glob('*/*.fits')):
+            with fits.open(path) as hdul:
+                hdr = hdul[0].header.copy()
+                total = hdul[0].data.astype(np.float32)
+                weight = hdul['WEIGHT'].data.astype(np.float32)
+                frames = list(hdul['FRAMES'].data['NAME'])
+            if _add_to_tile(Path(mapdir) / band / path.parent.name / path.name,
+                            hdr, frames, 0, 0, total, weight):
+                merged += 1
+            else:
+                logger.warning(f"{path}: frames already in {mapdir}, not merged")
+                skipped += 1
+    return merged, skipped
+
+
 # --- export --------------------------------------------------------------------
 
 def export(mapdir, outdir, bands):
@@ -510,6 +533,9 @@ def main():
     p = sub.add_parser('add', help='add calibrated frames (FITS with its dophot ECSV)')
     p.add_argument('--dir', required=True, help='map directory')
     p.add_argument('pairs', nargs='+', metavar='FITS ECSV')
+    p = sub.add_parser('merge', help='add the tiles of another map to this one')
+    p.add_argument('--dir', required=True, help='map directory')
+    p.add_argument('src', help='the map directory to add')
     p = sub.add_parser('export', help='write sum/weight of the changed tiles for Hipsgen')
     p.add_argument('--dir', required=True, help='map directory')
     p.add_argument('--out', required=True, help='Hipsgen input directory')
@@ -533,6 +559,8 @@ def main():
             sys.exit('give FITS ECSV pairs')
         for fits_path, ecsv_path in zip(args.pairs[::2], args.pairs[1::2]):
             logger.info(f"{Path(fits_path).name}: {add_frame(fits_path, ecsv_path, args.dir, prof)}")
+    elif args.cmd == 'merge':
+        logger.info("%d tiles merged, %d skipped" % merge(args.src, args.dir, prof.band_names()))
     elif args.cmd == 'export':
         n = export(args.dir, args.out, args.band or prof.band_names())
         logger.info(f"{n} tiles exported")
