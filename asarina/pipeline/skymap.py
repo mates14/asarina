@@ -17,7 +17,7 @@ flux is per tile pixel, on the AB scale with zero point 25 (m = 25 - 2.5 log f):
 the frame's background is subtracted and its ADU are scaled by dophot's
 photometric model (Z and the spatial terms, at zero color); w = 1/sigma^2 of
 the sky noise, so frames count by their depth, faded in by sin() over the
-EDGE px next to the frame edge, so that no frame leaves a step where it ends.  A running weighted mean cannot
+edge px (30) next to the frame edge, so that no frame leaves a step where it ends.  A running weighted mean cannot
 reject outliers: trails and cosmics fade with the number of frames, no more.
 
 `export` writes sum/weight per tile (NaN where nothing was added), the input
@@ -39,42 +39,69 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-NSIDE = 64
-SCALE = 3.14                # arcsec/px
 MARGIN = 8                  # px around the cell, for Hipsgen's bilinear resampling
 ZP = 25.0                   # flux scale of the map
-BANDS = {'Sloan_g': 'g', 'Sloan_r': 'r', 'Sloan_i': 'i'}
-
-FWHM_MAX = 2.5              # px
-DMAGZERO_MAX = 0.05
-
-EDGE = 30                   # frame px over which the weight fades in from the frame edge
-BOX = 256                   # background grid, px (~13' on SBT)
 GRID = 16                   # tile px between exact WCS evaluations
+
+
+class Profile:
+    """A camera's map: its tiling, bands and which frames go to it"""
+
+    def __init__(self, name, nside, scale, order, bands, fwhm_max, dmagzero_max,
+                 magzero_min=None, edge=30, box=256, title='{name} {band}'):
+        self.name = name
+        self.nside = nside              # HEALPix nside of the tiles
+        self.scale = scale              # arcsec/px of the tiles
+        self.order = order              # HiPS order of that scale (Hipsgen order=)
+        self.bands = bands              # FITS FILTER -> (map band, the PHFILTER it needs)
+        self.fwhm_max = fwhm_max        # px
+        self.dmagzero_max = dmagzero_max
+        self.magzero_min = magzero_min  # clouds: below this zeropoint the frame stays out
+        self.edge = edge                # frame px over which the weight fades in from the edge
+        self.box = box                  # background grid, frame px
+        self.title = title              # HiPS obs_title of a band
+
+    def band_names(self):
+        return sorted({band for band, _ in self.bands.values()})
+
+
+PROFILES = {
+    'sbt': Profile('SBT', nside=64, scale=3.14, order=7,
+                   bands={f'Sloan_{b}': (b, f'Sloan_{b}') for b in 'gri'},
+                   fwhm_max=2.5, dmagzero_max=0.05, box=256,          # 256 px ~13'
+                   title='{name} Sloan {band}'),
+    # Makak: 57"/px, no filter, calibrated to Gaia G; FWHM 3-6 px.  Tiles at
+    # 51.5" (HiPS order 3), 7.3 deg cells; 64 px background boxes (1 deg) follow
+    # the moonlit sky.  A clear sky has a zeropoint ~18.6 (2026-10).
+    'makak': Profile('Makak', nside=8, scale=51.5, order=3,
+                     bands={'N': ('G', 'G')},
+                     fwhm_max=6.0, dmagzero_max=0.05, magzero_min=18.4, box=64),
+}
+SBT = PROFILES['sbt']
 
 _WCS_KEY = re.compile(r'^(WCSAXES|CTYPE\d|CUNIT\d|CRVAL\d|CRPIX\d|CD\d_\d|PC\d_\d|CDELT\d|'
                       r'PV\d_\d+|LONPOLE|LATPOLE|EQUINOX|RADESYS|'
                       r'A_ORDER|B_ORDER|AP_ORDER|BP_ORDER|A_\d_\d|B_\d_\d|AP_\d_\d|BP_\d_\d)$')
 
 
-def _healpix():
+def _healpix(prof):
     from astropy_healpix import HEALPix
-    return HEALPix(NSIDE, order='nested')
+    return HEALPix(prof.nside, order='nested')
 
 
 # --- tiles ---------------------------------------------------------------------
 
-def tile_header(ipix):
+def tile_header(ipix, prof=SBT):
     """TAN header of tile ipix: centered on the cell, rotated to fit it"""
     from astropy.io import fits
     from astropy.wcs import WCS
     import astropy.units as u
 
-    hp = _healpix()
+    hp = _healpix(prof)
     lon, lat = hp.healpix_to_lonlat([ipix])
     blon, blat = hp.boundaries_lonlat([ipix], step=16)
     ra, dec = lon.to_value(u.deg)[0], lat.to_value(u.deg)[0]
-    scale = SCALE / 3600
+    scale = prof.scale / 3600
 
     w = WCS(naxis=2)
     w.wcs.ctype = ['RA---TAN', 'DEC--TAN']
@@ -106,7 +133,7 @@ def tile_header(ipix):
     hdr['CD2_2'] = scale * ck
     hdr['RADESYS'] = 'ICRS'
     hdr['EQUINOX'] = 2000.0
-    hdr['HPXNSIDE'] = (NSIDE, 'HEALPix nside of the tiling (nested)')
+    hdr['HPXNSIDE'] = (prof.nside, 'HEALPix nside of the tiling (nested)')
     hdr['HPXIPIX'] = (ipix, 'HEALPix cell of this tile')
     return hdr
 
@@ -117,26 +144,28 @@ def tile_path(mapdir, band, ipix):
 
 # --- frame ---------------------------------------------------------------------
 
-def frame_band(meta):
+def frame_band(meta, prof=SBT):
     """Map band of the frame, None if it does not go to the map"""
-    band = BANDS.get(str(meta.get('FILTER', '')).strip())
-    if band and str(meta.get('PHFILTER', '')).strip() == str(meta.get('FILTER')).strip():
-        return band
+    band = prof.bands.get(str(meta.get('FILTER', '')).strip())
+    if band and str(meta.get('PHFILTER', '')).strip() == band[1]:
+        return band[0]
     return None
 
 
-def frame_gate(meta):
+def frame_gate(meta, prof=SBT):
     """Why the frame does not go to the map, None if it does"""
-    if frame_band(meta) is None:
+    if frame_band(meta, prof) is None:
         return f"filter {meta.get('FILTER')} (calibrated to {meta.get('PHFILTER')})"
     if meta.get('ASTQUAL') != 'OK':
         return f"ASTQUAL={meta.get('ASTQUAL')}"
     if meta.get('PHQUAL') != 'OK':
         return f"PHQUAL={meta.get('PHQUAL')}"
-    if not float(meta.get('FWHM', 99)) <= FWHM_MAX:
-        return f"FWHM={meta.get('FWHM')} > {FWHM_MAX}"
-    if not float(meta.get('DMAGZERO', 99)) <= DMAGZERO_MAX:
-        return f"DMAGZERO={meta.get('DMAGZERO')} > {DMAGZERO_MAX}"
+    if not float(meta.get('FWHM', 99)) <= prof.fwhm_max:
+        return f"FWHM={meta.get('FWHM')} > {prof.fwhm_max}"
+    if not float(meta.get('DMAGZERO', 99)) <= prof.dmagzero_max:
+        return f"DMAGZERO={meta.get('DMAGZERO')} > {prof.dmagzero_max}"
+    if prof.magzero_min is not None and not float(meta.get('MAGZERO', 0)) >= prof.magzero_min:
+        return f"MAGZERO={meta.get('MAGZERO')} < {prof.magzero_min}"
     return None
 
 
@@ -179,20 +208,20 @@ class _Smooth:
                               np.clip(x, self.gx[0], self.gx[-1]))
 
 
-def _box_centers(n):
-    return (np.arange(-(-n // BOX)) + 0.5) * BOX - 0.5
+def _box_centers(n, box):
+    return (np.arange(-(-n // box)) + 0.5) * box - 0.5
 
 
-def _background(data, good):
-    """Sky background: clipped median in BOX x BOX boxes (every 4th pixel),
+def _background(data, good, box):
+    """Sky background: clipped median in box x box boxes (every 4th pixel),
     smoothed; a _Smooth over the frame"""
     from scipy.ndimage import median_filter
     import warnings
     ny, nx = data.shape
-    by, bx = -(-ny // BOX), -(-nx // BOX)
-    pad = np.full((by * BOX, bx * BOX), np.nan, dtype=np.float32)
+    by, bx = -(-ny // box), -(-nx // box)
+    pad = np.full((by * box, bx * box), np.nan, dtype=np.float32)
     pad[:ny, :nx] = np.where(good, data, np.nan)
-    boxes = pad.reshape(by, BOX, bx, BOX).transpose(0, 2, 1, 3).reshape(by, bx, -1)[..., ::4]
+    boxes = pad.reshape(by, box, bx, box).transpose(0, 2, 1, 3).reshape(by, bx, -1)[..., ::4]
     with np.errstate(all='ignore'), warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
         for _ in range(2):
@@ -201,10 +230,10 @@ def _background(data, good):
             boxes = np.where(np.abs(boxes - med) < 3 * 1.4826 * mad, boxes, np.nan)
         grid = np.nanmedian(boxes, axis=2)
     grid = np.where(np.isfinite(grid), grid, np.nanmedian(grid))
-    return _Smooth(_box_centers(ny), _box_centers(nx), median_filter(grid, size=3, mode='nearest'))
+    return _Smooth(_box_centers(ny, box), _box_centers(nx, box), median_filter(grid, size=3, mode='nearest'))
 
 
-def _zeropoint(meta, mag_ref, shape):
+def _zeropoint(meta, mag_ref, shape, box):
     """Z(x, y) of dophot's model at zero color for an instrumental magnitude
     mag_ref, a _Smooth over the frame (pixels are 0-based, the model's
     X/Y_IMAGE 1-based)"""
@@ -224,7 +253,7 @@ def _zeropoint(meta, mag_ref, shape):
     ffit = fotfit()
     ffit.fixterm(terms, values=values)
 
-    cy, cx = _box_centers(shape[0]), _box_centers(shape[1])
+    cy, cx = _box_centers(shape[0], box), _box_centers(shape[1], box)
     y, x = np.meshgrid(cy + 1, cx + 1, indexing='ij')
     x, y = x.ravel(), y.ravel()
     m = np.full(x.size, mag_ref)
@@ -234,10 +263,10 @@ def _zeropoint(meta, mag_ref, shape):
     return _Smooth(cy, cx, z.reshape(cy.size, cx.size))
 
 
-def _candidate_tiles(wcs, shape):
+def _candidate_tiles(wcs, shape, prof):
     """Cells the frame touches, and their neighbours (a tile reaches past its cell)"""
     import astropy.units as u
-    hp = _healpix()
+    hp = _healpix(prof)
     ny, nx = shape
     y, x = np.meshgrid(np.linspace(0, ny - 1, 33), np.linspace(0, nx - 1, 33), indexing='ij')
     ra, dec = wcs.all_pix2world(x.ravel(), y.ravel(), 0)
@@ -247,10 +276,10 @@ def _candidate_tiles(wcs, shape):
     return np.unique(np.concatenate([cells, near[near >= 0]]))
 
 
-def _resample(tile_hdr, fwcs, flux, sigma_scale):
+def _resample(tile_hdr, fwcs, flux, sigma_scale, edge_px):
     """The frame on the tile: flux per tile pixel (bilinear, NaN wherever a bad
     or outside pixel takes part), its noise and the edge fade of the weight,
-    sin() from 0 at the frame edge to 1 at EDGE px in; (y0, x0, flux, sigma,
+    sin() from 0 at the frame edge to 1 at edge_px in; (y0, x0, flux, sigma,
     fade) or None.
     flux is per frame pixel with bad pixels NaN, sigma_scale a _Smooth of its
     noise."""
@@ -295,7 +324,7 @@ def _resample(tile_hdr, fwcs, flux, sigma_scale):
 
     f = map_coordinates(flux, [py, px], order=1, mode='constant', cval=np.nan, prefilter=False)
     edge = np.minimum(np.minimum(px, nx - 1 - px), np.minimum(py, ny - 1 - py))
-    fade = np.sin(np.pi / 2 * np.clip(edge / EDGE, 0, 1)).astype(np.float32)
+    fade = np.sin(np.pi / 2 * np.clip(edge / edge_px, 0, 1)).astype(np.float32)
     return y0, x0, f * area, sigma, fade
 
 
@@ -356,7 +385,7 @@ def _read_ecsv(ecsv_path):
     return dict(head.get('meta', {})), float(np.nanmedian(col.to_numpy(dtype=float)))
 
 
-def add_frame(fits_path, ecsv_path, mapdir):
+def add_frame(fits_path, ecsv_path, mapdir, prof=SBT):
     """Add a calibrated frame (with its dophot ECSV) to the map; number of
     tiles it went to, or the reason it did not go"""
     from astropy.io import fits
@@ -364,10 +393,10 @@ def add_frame(fits_path, ecsv_path, mapdir):
     from pyrt.cli.phcat import get_saturation
 
     meta, mag_ref = _read_ecsv(str(ecsv_path))
-    reason = frame_gate(meta)
+    reason = frame_gate(meta, prof)
     if reason:
         return reason
-    band = frame_band(meta)
+    band = frame_band(meta, prof)
     frame = str(meta['FITSFILE'])[:19]
 
     data = fits.getdata(str(fits_path)).astype(np.float32)
@@ -376,10 +405,10 @@ def add_frame(fits_path, ecsv_path, mapdir):
 
     ny, nx = data.shape
     rows, cols = np.arange(ny, dtype=float), np.arange(nx, dtype=float)
-    data -= _background(data, good).grid(rows, cols)
+    data -= _background(data, good, prof.box).grid(rows, cols)
     # cold pixels: nothing on the sky is that far below the background
     good &= data > -5 * float(meta['BGSIGMA'])
-    zp = _zeropoint(meta, mag_ref, data.shape)
+    zp = _zeropoint(meta, mag_ref, data.shape, prof.box)
     data *= 10 ** (0.4 * (ZP - zp.grid(rows, cols)))
     data[~good] = np.nan
     sigma_scale = _Smooth(zp.gy, zp.gx, float(meta['BGSIGMA']) *
@@ -387,9 +416,9 @@ def add_frame(fits_path, ecsv_path, mapdir):
 
     fwcs = frame_wcs(meta)
     added = 0
-    for ipix in _candidate_tiles(fwcs, data.shape):
-        hdr = tile_header(int(ipix))
-        res = _resample(hdr, fwcs, data, sigma_scale)
+    for ipix in _candidate_tiles(fwcs, data.shape, prof):
+        hdr = tile_header(int(ipix), prof)
+        res = _resample(hdr, fwcs, data, sigma_scale, prof.edge)
         if res is None:
             continue
         y0, x0, f, s, fade = res
@@ -433,11 +462,11 @@ ROOT = '/storage2/reprocess'
 RGB = (('inRed', 'i'), ('inGreen', 'r'), ('inBlue', 'g'))
 
 
-def hips(mapdir, exportdir, hipsdir, jar, memory, threads):
+def hips(mapdir, exportdir, hipsdir, jar, memory, threads, prof=SBT):
     """Export, then a fresh HiPS per band and the gri color HiPS; False if
     Hipsgen failed somewhere (its log is <hipsdir>/<band>.log)"""
     import subprocess
-    logger.info(f"{export(mapdir, exportdir, sorted(BANDS.values()))} tiles exported")
+    logger.info(f"{export(mapdir, exportdir, prof.band_names())} tiles exported")
     java = ['nice', 'java', f'-Xmx{memory}', '-jar', jar, '-nocolor', '-clean']
     Path(hipsdir).mkdir(parents=True, exist_ok=True)
 
@@ -451,13 +480,15 @@ def hips(mapdir, exportdir, hipsdir, jar, memory, threads):
         return rc == 0
 
     ok, built = True, []
-    for band in sorted(BANDS.values()):
+    for band in prof.band_names():
         if not any((Path(exportdir) / band).glob('*/*.fits')):
             continue
-        # order=7 (3.22"): Hipsgen takes the pixel scale from CD1_1 alone,
-        # which the rotated tiles make 2.22", and would go to order 8
+        # order=7 for SBT (3.22"): Hipsgen takes the pixel scale from CD1_1
+        # alone, which the rotated tiles make 2.22", and would go to order 8
         if run(band, [f'in={exportdir}/{band}', f'out={hipsdir}/{band}',
-                      f'id=ASU/P/SBT/{band}', f'obs_title=SBT Sloan {band}', 'order=7',
+                      f'id=ASU/P/{prof.name}/{band}',
+                      f'obs_title={prof.title.format(name=prof.name, band=band)}',
+                      f'order={prof.order}',
                       'mode=overlayMean', f'maxthread={threads}', 'pixelCut=0.5% 99.5% asinh']):
             built.append(band)
         else:
@@ -482,7 +513,7 @@ def main():
     p = sub.add_parser('export', help='write sum/weight of the changed tiles for Hipsgen')
     p.add_argument('--dir', required=True, help='map directory')
     p.add_argument('--out', required=True, help='Hipsgen input directory')
-    p.add_argument('--band', action='append', choices=sorted(BANDS.values()))
+    p.add_argument('--band', action='append')
     p = sub.add_parser('hips', help='full rebuild: export, HiPS per band and gri color HiPS')
     p.add_argument('--dir', default=f'{ROOT}/skymap', help='map directory (default: %(default)s)')
     p.add_argument('--export', default=f'{ROOT}/export',
@@ -491,20 +522,23 @@ def main():
     p.add_argument('--jar', default=f'{ROOT}/Hipsgen.jar', help='(default: %(default)s)')
     p.add_argument('--memory', default='32g', help='java -Xmx (default: %(default)s)')
     p.add_argument('--threads', type=int, default=8, help='(default: %(default)s)')
+    parser.add_argument('--profile', choices=sorted(PROFILES), default='sbt',
+                        help='camera: tiling, bands and frame gates (default: %(default)s)')
     args = parser.parse_args()
+    prof = PROFILES[args.profile]
     logging.basicConfig(level=logging.INFO, format='%(message)s')
 
     if args.cmd == 'add':
         if len(args.pairs) % 2:
             sys.exit('give FITS ECSV pairs')
         for fits_path, ecsv_path in zip(args.pairs[::2], args.pairs[1::2]):
-            logger.info(f"{Path(fits_path).name}: {add_frame(fits_path, ecsv_path, args.dir)}")
+            logger.info(f"{Path(fits_path).name}: {add_frame(fits_path, ecsv_path, args.dir, prof)}")
     elif args.cmd == 'export':
-        n = export(args.dir, args.out, args.band or sorted(BANDS.values()))
+        n = export(args.dir, args.out, args.band or prof.band_names())
         logger.info(f"{n} tiles exported")
     else:
         sys.exit(0 if hips(args.dir, args.export, args.hips, args.jar,
-                           args.memory, args.threads) else 1)
+                           args.memory, args.threads, prof) else 1)
 
 
 if __name__ == '__main__':

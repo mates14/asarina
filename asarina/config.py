@@ -42,6 +42,8 @@ Recognised keys (underscores or dashes interchangeable):
   wcs_guess_keep    bool   false  an unverified refit from the guess (clouds) falls
                                   back to photometry on the guess as it is
   min_idnum         int    20     reject frames with at most this many matched stars
+  skymap_dir        str           add good frames to the sky map tiles here (asarina-skymap)
+  skymap_profile    str    sbt    its tiling, bands and frame gates: sbt or makak
   stat_dir          str
   model_file        str
   ssh_key           str

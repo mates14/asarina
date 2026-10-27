@@ -476,6 +476,8 @@ def main():
                         help='Do not write the WCS into the raw image (read-only archive)')
     output.add_argument('--skymap-dir', metavar='DIR',
                         help='Add good g/r/i frames to the sky map tiles in DIR (asarina-skymap)')
+    output.add_argument('--skymap-profile', default='sbt',
+                        help='Sky map tiling, bands and frame gates: sbt or makak (default: %(default)s)')
     output.add_argument('--png-root', default='/home/mates/png')
     output.add_argument('--daily-summary', metavar='DIR', dest='daily_summary_dir',
                         help='Directory for nightly summary .dat files')
@@ -777,9 +779,10 @@ def main():
         # A map failure is logged, the frame itself is done.
         if ecsv_path is not None and args.skymap_dir:
             try:
-                from asarina.pipeline.skymap import add_frame
+                from asarina.pipeline.skymap import add_frame, PROFILES
                 t_map = time.time()
-                res = add_frame(calibrated, ecsv_path, args.skymap_dir)
+                res = add_frame(calibrated, ecsv_path, args.skymap_dir,
+                                PROFILES[args.skymap_profile])
                 logger.info(f"skymap: {res} ({time.time() - t_map:.1f}s)")
             except Exception as e:
                 logger.exception(f"skymap: {e}")
