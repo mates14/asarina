@@ -18,6 +18,8 @@ Recognised keys (underscores or dashes interchangeable):
                                   from the frame (lit clouds pass for 50 px stars)
   phcat_back_size   int           SExtractor background mesh in px (pyrt: 256)
   phcat_aperture    float         fixed aperture radius in px (pyrt: sqrt(FWHM^2+1.5^2))
+  phcat_noiraf      bool   false  photometry by SExtractor (MAG_APER with phcat_aperture)
+                                  instead of IRAF phot
   makak             bool   false
   dophot_model      str
   dophot_catalog    str
@@ -82,7 +84,8 @@ USER_CONFIG_FILE   = '~/.config/asarina/config'
 # comparison; for a bool it is worse and silent, since "false" is a non-empty
 # string and therefore true.  Add new typed options here as they appear.
 _BOOL_KEYS  = frozenset({'sbt_window_patch', 'makak', 'refit_zpn', 'zpn_from_camera',
-                         'phdb_by_night', 'no_raw_update', 'wcs_guess_keep'})
+                         'phdb_by_night', 'no_raw_update', 'wcs_guess_keep',
+                         'phcat_noiraf'})
 _INT_KEYS   = frozenset({'sip', 'passes', 'dophot_idlimit', 'dophot_max_stars', 'dophot_workers',
                          'db_min_idnum', 'phcat_back_size', 'min_idnum'})
 _FLOAT_KEYS = frozenset({'pixel_scale', 'phcat_fwhm', 'phcat_aperture', 'dophot_maglim', 'dophot_enlarge',

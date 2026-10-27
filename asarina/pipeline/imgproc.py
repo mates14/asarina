@@ -498,6 +498,9 @@ def main():
                        help='pyrt-phcat background mesh (pyrt default 256)')
     solve.add_argument('--phcat-aperture', type=float, metavar='PX',
                        help='Fixed aperture radius for pyrt-phcat instead of one from the FWHM')
+    solve.add_argument('--phcat-noiraf', action='store_true',
+                       help='pyrt-phcat photometry by SExtractor instead of IRAF '
+                            '(a fixed aperture with --phcat-aperture)')
     solve.add_argument('--pixel-scale', type=float, metavar='ARCSEC',
                        help='Pixel scale hint for pyrt-field-solve (arcsec/px)')
     solve.add_argument('--wcs-guess', metavar='DIR', dest='wcs_guess_dir',
@@ -614,6 +617,7 @@ def main():
         phcat_fwhm=args.phcat_fwhm,
         phcat_back_size=args.phcat_back_size,
         phcat_aperture=args.phcat_aperture,
+        phcat_noiraf=args.phcat_noiraf,
         dophot_model=args.dophot_model,
         dophot_catalog=args.dophot_catalog,
         dophot_maglim=args.dophot_maglim,

@@ -38,6 +38,7 @@ class PhotometryPipeline:
                  phcat_fwhm: float = None,
                  phcat_back_size: int = None,
                  phcat_aperture: float = None,
+                 phcat_noiraf: bool = False,
                  dophot_model: str = None,
                  dophot_catalog: str = None,
                  dophot_maglim: float = None,
@@ -66,6 +67,7 @@ class PhotometryPipeline:
         self.phcat_fwhm = phcat_fwhm
         self.phcat_back_size = phcat_back_size
         self.phcat_aperture = phcat_aperture
+        self.phcat_noiraf = phcat_noiraf
         self.phdb_date_fmt = phdb_date_fmt
         # Date the phdb subdirectory by the night (UT - 12 h, as the RTS2
         # archive does) rather than by the local calendar date, so that a
@@ -285,6 +287,8 @@ class PhotometryPipeline:
             phcat_cmd += ["--back-size", str(self.phcat_back_size)]
         if self.phcat_aperture is not None:
             phcat_cmd += ["--aperture", str(self.phcat_aperture)]
+        if self.phcat_noiraf:
+            phcat_cmd.append("-I")
         ret = subprocess.run(
             phcat_cmd + [fits_file],
             cwd=str(temp_dir), capture_output=True, text=True,
