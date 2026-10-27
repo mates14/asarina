@@ -48,7 +48,8 @@ class Profile:
     """A camera's map: its tiling, bands and which frames go to it"""
 
     def __init__(self, name, nside, scale, order, bands, fwhm_max, dmagzero_max,
-                 magzero_min=None, edge=30, box=256, title='{name} {band}'):
+                 magzero_min=None, sun_alt_max=None, edge=30, box=256,
+                 title='{name} {band}'):
         self.name = name
         self.nside = nside              # HEALPix nside of the tiles
         self.scale = scale              # arcsec/px of the tiles
@@ -57,6 +58,7 @@ class Profile:
         self.fwhm_max = fwhm_max        # px
         self.dmagzero_max = dmagzero_max
         self.magzero_min = magzero_min  # clouds: below this zeropoint the frame stays out
+        self.sun_alt_max = sun_alt_max  # twilight: deg, with the Sun higher the frame stays out
         self.edge = edge                # frame px over which the weight fades in from the edge
         self.box = box                  # background grid, frame px
         self.title = title              # HiPS obs_title of a band
@@ -72,10 +74,14 @@ PROFILES = {
                    title='{name} Sloan {band}'),
     # Makak: 57"/px, no filter, calibrated to Gaia G; FWHM 3-6 px.  Tiles at
     # 51.5" (HiPS order 3), 7.3 deg cells; 64 px background boxes (1 deg) follow
-    # the moonlit sky.  A clear sky has a zeropoint ~18.6 (2026-10).
+    # the moonlit sky.  A clear sky has a zeropoint ~18.6 (2026-10), 18.57 on
+    # 2026-10-26; below ~18.45 or with DMAGZERO above ~0.03 the frames did the
+    # map no good (that night; the clear baseline moves with the aerosols).
+    # Twilight frames left bright arcs at the map's edge.
     'makak': Profile('Makak', nside=8, scale=51.5, order=3,
                      bands={'N': ('G', 'G')},
-                     fwhm_max=6.0, dmagzero_max=0.05, magzero_min=18.4, box=64),
+                     fwhm_max=6.0, dmagzero_max=0.03, magzero_min=18.45,
+                     sun_alt_max=-12.0, box=64),
 }
 SBT = PROFILES['sbt']
 
@@ -166,7 +172,22 @@ def frame_gate(meta, prof=SBT):
         return f"DMAGZERO={meta.get('DMAGZERO')} > {prof.dmagzero_max}"
     if prof.magzero_min is not None and not float(meta.get('MAGZERO', 0)) >= prof.magzero_min:
         return f"MAGZERO={meta.get('MAGZERO')} < {prof.magzero_min}"
+    if prof.sun_alt_max is not None:
+        alt = sun_altitude(meta)
+        if not alt <= prof.sun_alt_max:
+            return f"Sun at {alt:.1f} deg > {prof.sun_alt_max}"
     return None
+
+
+def sun_altitude(meta):
+    """Altitude of the Sun in deg at the frame's JD, from its site"""
+    from astropy.coordinates import AltAz, EarthLocation, get_sun
+    from astropy.time import Time
+    import astropy.units as u
+    site = EarthLocation(lat=float(meta['LATITUDE']) * u.deg, lon=float(meta['LONGITUD']) * u.deg,
+                         height=float(meta.get('ALTITUDE', 0)) * u.m)
+    t = Time(float(meta['JD']), format='jd')
+    return float(get_sun(t).transform_to(AltAz(obstime=t, location=site)).alt.deg)
 
 
 def frame_wcs(meta):
