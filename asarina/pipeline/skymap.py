@@ -49,7 +49,7 @@ class Profile:
 
     def __init__(self, name, nside, scale, order, bands, fwhm_max, dmagzero_max,
                  magzero_min=None, sun_alt_max=None, edge=30, box=256,
-                 title='{name} {band}'):
+                 title='{name} {band}', pixel_cut='0.5% 99.5% asinh'):
         self.name = name
         self.nside = nside              # HEALPix nside of the tiles
         self.scale = scale              # arcsec/px of the tiles
@@ -62,6 +62,7 @@ class Profile:
         self.edge = edge                # frame px over which the weight fades in from the edge
         self.box = box                  # background grid, frame px
         self.title = title              # HiPS obs_title of a band
+        self.pixel_cut = pixel_cut      # Hipsgen pixelCut of the PNG tiles
 
     def band_names(self):
         return sorted({band for band, _ in self.bands.values()})
@@ -81,7 +82,10 @@ PROFILES = {
     'makak': Profile('Makak', nside=8, scale=51.5, order=3,
                      bands={'N': ('G', 'G')},
                      fwhm_max=6.0, dmagzero_max=0.03, magzero_min=18.45,
-                     sun_alt_max=-12.0, box=64),
+                     sun_alt_max=-12.0, box=64,
+                     # sky noise ~9400 per px (15.1 mag/px) after one night; the
+                     # 0.5% cut fell at -8 sigma (edges, few frames): grey tiles
+                     pixel_cut='-20000 300000 asinh'),
 }
 SBT = PROFILES['sbt']
 
@@ -533,7 +537,7 @@ def hips(mapdir, exportdir, hipsdir, jar, memory, threads, prof=SBT):
                       f'id=ASU/P/{prof.name}/{band}',
                       f'obs_title={prof.title.format(name=prof.name, band=band)}',
                       f'order={prof.order}',
-                      'mode=overlayMean', f'maxthread={threads}', 'pixelCut=0.5% 99.5% asinh']):
+                      'mode=overlayMean', f'maxthread={threads}', f'pixelCut={prof.pixel_cut}']):
             built.append(band)
         else:
             ok = False
