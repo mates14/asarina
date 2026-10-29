@@ -1,0 +1,20 @@
+# Makak nightly graph from the asarina results, uploaded to lascaux
+# (replaces makak-plot.service / ~/test/crawl-plot)
+[Unit]
+Description=MAKAK nightly graph to lascaux
+After=makak-asarina.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mates
+Group=mates
+WorkingDirectory=/home/mates/asarina+makak/web
+Environment=LANG=C
+ExecStart=/home/mates/asarina+makak/web/makak-web
+Restart=always
+RestartSec=30
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

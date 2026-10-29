@@ -1,0 +1,36 @@
+# Makak realtime photometry with asarina: every new frame in /images (newest
+# first, backlog dropped) through asarina-imgproc with etc/asarina.conf.
+# Runs beside makak-acquire (RTS2) on morpheus, as mates, read-only on /images.
+[Unit]
+Description=MAKAK asarina realtime photometry
+After=rts2.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=mates
+Group=mates
+WorkingDirectory=/home/mates/asarina+makak
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+# pyrt-phcat runs IRAF, which refuses to start without TERM
+Environment=TERM=xterm
+# Three imgproc runs on four cores: one BLAS thread each, the fourth core for RTS2
+Environment=OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+ExecStart=/usr/local/bin/asarina-watch --systemd \
+    --search-root /images --camera-pattern "" \
+    --config /home/mates/asarina+makak/etc/asarina.conf \
+    --latest-only --max-workers 3 --min-age 1 --frame-timeout 180
+Restart=always
+RestartSec=30
+TimeoutStopSec=30
+# Image acquisition comes first
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+MemoryMax=3G
+SyslogIdentifier=makak-asarina
+
+[Install]
+WantedBy=multi-user.target

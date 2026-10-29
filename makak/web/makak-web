@@ -1,0 +1,21 @@
+#!/bin/bash
+# Makak nightly graph: whenever asarina adds to tonight's nght/mrYYYYMMDD*.dat,
+# replot it with makak-plot.sh (zeus's makak-reloaded graph), which uploads to
+# lascaux.
+
+base=/home/mates/asarina+makak
+cd $base/web || exit 1
+
+old=""
+while true; do
+	night=$(date -u -d '12 hours ago' +%Y%m%d)
+	mr=$base/nght/mr$night.dat
+	if [ -e $mr ]; then
+		stamp=$(stat -c %Y $base/nght/mr$night*.dat | sort -n | tail -1)
+		if [ "$night $stamp" != "$old" ]; then
+			./makak-plot.sh $mr
+			old="$night $stamp"
+		fi
+	fi
+	sleep 30
+done
