@@ -42,6 +42,7 @@ Setup (~/.config/asarina/reprocess.ini):
     config = ~/.config/asarina/d50.conf       # asarina config for imgproc
     cameras = C0                              # CCD directories, default all
     args = --sbt-window-patch                 # more imgproc options
+    until = 20261028                          # last night, default all but settle_days
 
 phdb_root, phdb_date_fmt and phdb_by_night go to the asarina configs.
 """
@@ -119,6 +120,7 @@ class Archive:
         cams = section.get('cameras', '').replace(',', ' ').split()
         self.cameras = set(cams) or None
         self.args = shlex.split(section.get('args', ''))
+        self.until = section.get('until')   # YYYYMMDD: no later night (it is left to real time)
         self.cfg = None     # asarina config [DEFAULT], for the phdb layout
 
     def pipeline(self):
@@ -142,10 +144,14 @@ class Archive:
         return sorted(found, reverse=True)
 
     def scan_night(self, night):
-        """(path, ccd) of the frames of a night: target directories and queue/"""
+        """(path, ccd) of the frames of a night: target directories and queue/,
+        or the frames right in the night directory"""
         frames = []
         night_dir = self.root / night[:4] / night
         for ccd in os.scandir(night_dir):
+            if ccd.is_file() and ccd.name.endswith(('.fits', '.fit')):
+                frames.append((ccd.path, ''))       # one camera, frames in the night (Makak)
+                continue
             if not ccd.is_dir():
                 continue
             for target in os.scandir(ccd.path):
@@ -210,7 +216,8 @@ class Reprocessor:
         for a in self.archives:
             scanned = {n for (n,) in self.state.query(
                 "SELECT night FROM nights WHERE archive=?", (a.name,))}
-            self.night_lists[a.name] = [n for n in a.nights() if n <= last and n not in scanned]
+            self.night_lists[a.name] = [n for n in a.nights() if n <= min(last, a.until or last)
+                                        and n not in scanned]
             logger.info(f"{a.name}: {len(self.night_lists[a.name])} nights not yet listed")
         self.nights_listed = time.time()
 
