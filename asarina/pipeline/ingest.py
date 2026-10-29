@@ -2,6 +2,7 @@
 
 import fcntl
 import os
+import re
 import subprocess
 import tempfile
 import shutil
@@ -54,6 +55,7 @@ class PhotometryPipeline:
                  wcs_guess_dir: str = None,
                  wcs_guess_keep: bool = False,
                  min_idnum: int = 20,
+                 phqual_rs_max: float = None,
                  # Makak-mode bundle
                  makak_mode: bool = False):
 
@@ -130,6 +132,7 @@ class PhotometryPipeline:
         self.wcs_guess_fresh = False
         self.wcs_guess_keep = wcs_guess_keep
         self.min_idnum = min_idnum
+        self.phqual_rs_max = phqual_rs_max
 
         # The calibrated frame of the last calibrate(), for the failure summary
         self.calibrated = None
@@ -467,6 +470,7 @@ class PhotometryPipeline:
             return None
         logger.info(f"Solution quality ok: ASTQUAL={qual} ASTCOVER={meta.get('ASTCOVER')}"
                     f" ASTSIGMA={meta.get('ASTSIGMA')} IDNUM={idnum}")
+        self._flag_rs(temp_dir / ecsv_file, meta)
 
         solved = temp_dir / fits_file.replace('.fits', 't.fits')
         if self.wcs_guess_dir is not None and qual == 'OK' and solved.exists():
@@ -592,6 +596,42 @@ class PhotometryPipeline:
                 os.replace(tmp, guess_file)
         except Exception as e:
             logger.warning(f"WCS guess not stored: {e}")
+
+    def _flag_rs(self, ecsv_path: Path, meta: dict) -> None:
+        """PHQUAL=BADFIT when the fitted RS term is out of bounds.
+
+        With few or wrong matches (Makak: a WCS guess hours off) the fit
+        takes RS ~0.9, the calibration slope drops to 0.1 and every star
+        comes out alike; a good Makak frame has RS -0.06..-0.01.  The
+        photometry is kept, the flag tells the consumers (skymap, DB, any
+        analysis) to leave it out.  The two header lines are edited in place,
+        the table stays as pyrt-dophot wrote it.
+        """
+        if self.phqual_rs_max is None:
+            return
+        terms = dict(t.split('=', 1) for t in str(meta.get('RESPONSE', '')).split(',') if '=' in t)
+        try:
+            rs = float(terms.get('RS', 0.0))
+        except ValueError:
+            return
+        if abs(rs) <= self.phqual_rs_max:
+            return
+        reason = f"RS={rs:.3f} beyond {self.phqual_rs_max:g}"
+        text = ecsv_path.read_text()
+        text, n = re.subn(r"^# - \{PHQUAL: [^}]*\}$", "# - {PHQUAL: BADFIT}", text,
+                          count=1, flags=re.M)
+        if n == 0:
+            logger.warning(f"{reason}, but no PHQUAL in the ECSV to flag")
+            return
+        old = re.search(r"^# - \{PHQREAS: (.*)\}$", text, flags=re.M)
+        prev = old.group(1).strip("'\"") if old else ''
+        line = "# - {PHQREAS: '" + (f"{prev}; " if prev else '') + reason + "'}"
+        if old:
+            text = text[:old.start()] + line + text[old.end():]
+        else:
+            text = text.replace("# - {PHQUAL: BADFIT}", "# - {PHQUAL: BADFIT}\n" + line, 1)
+        ecsv_path.write_text(text)
+        logger.warning(f"PHQUAL=BADFIT: {reason}")
 
     @staticmethod
     def _astqual(ecsv_path: Path) -> Optional[str]:

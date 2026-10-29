@@ -42,6 +42,8 @@ Recognised keys (underscores or dashes interchangeable):
   wcs_guess_keep    bool   false  an unverified refit from the guess (clouds) falls
                                   back to photometry on the guess as it is
   min_idnum         int    20     reject frames with at most this many matched stars
+  phqual_rs_max     float         PHQUAL=BADFIT (photometry kept) when the fitted
+                                  RS term exceeds this in absolute value
   skymap_dir        str           add good frames to the sky map tiles here (asarina-skymap)
   skymap_profile    str    sbt    its tiling, bands and frame gates: sbt or makak
   stat_dir          str
@@ -91,7 +93,8 @@ _BOOL_KEYS  = frozenset({'sbt_window_patch', 'makak', 'refit_zpn', 'zpn_from_cam
 _INT_KEYS   = frozenset({'sip', 'passes', 'dophot_idlimit', 'dophot_max_stars', 'dophot_workers',
                          'db_min_idnum', 'phcat_back_size', 'min_idnum'})
 _FLOAT_KEYS = frozenset({'pixel_scale', 'phcat_fwhm', 'phcat_aperture', 'dophot_maglim', 'dophot_enlarge',
-                          'gain', 'readnoise', 'ape', 'default_fwhm', 'zp_r', 'db_max_fwhm'})
+                          'gain', 'readnoise', 'ape', 'default_fwhm', 'zp_r', 'db_max_fwhm',
+                          'phqual_rs_max'})
 
 
 def _norm(key: str) -> str:

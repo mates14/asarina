@@ -517,6 +517,9 @@ def main():
     phot.add_argument('--dophot-model', metavar='FILE')
     phot.add_argument('--min-idnum', type=int, default=20, metavar='N',
                       help='Reject frames with at most N matched stars (default 20)')
+    phot.add_argument('--phqual-rs-max', type=float, metavar='X',
+                      help='Flag the photometry PHQUAL=BADFIT (still written) when the '
+                           'fitted RS term exceeds X in absolute value')
     phot.add_argument('--dophot-catalog', metavar='NAME')
     phot.add_argument('--dophot-maglim', type=float, metavar='N')
     phot.add_argument('--dophot-enlarge', type=float, metavar='N')
@@ -634,6 +637,7 @@ def main():
         wcs_guess_dir=args.wcs_guess_dir,
         wcs_guess_keep=args.wcs_guess_keep,
         min_idnum=args.min_idnum,
+        phqual_rs_max=args.phqual_rs_max,
         makak_mode=args.makak,
     )
 
