@@ -122,12 +122,14 @@ class Archive:
         self.args = shlex.split(section.get('args', ''))
         self.until = section.get('until')   # YYYYMMDD: no later night (it is left to real time)
         self.cfg = None     # asarina config [DEFAULT], for the phdb layout
+        self.makak = False  # Makak: darks in the frame stream (shutter closed)
 
     def pipeline(self):
         """PhotometryPipeline laid out as imgproc will be, to find its ECSVs"""
         from asarina.config import load_config
         from asarina.pipeline.ingest import PhotometryPipeline
         cfg = load_config(self.config)
+        self.makak = bool(cfg.get('makak'))
         # the archive's imgproc args may put the ECSVs elsewhere
         phdb_root = cfg.get('phdb_root')
         for i, arg in enumerate(self.args):
@@ -355,6 +357,9 @@ class Reprocessor:
             ecsvs = self._old_ecsvs(a, path)
             if proc.returncode == 0 and ecsvs:
                 res.update(status='done', reason=None, ecsv=str(ecsvs[0]))
+            elif proc.returncode == 0 and a.makak and float(header.get('SLITPOSX', 1.0)) < 0.5:
+                # imgproc only added it to the night's dark statistics
+                res.update(status='skipped', reason='dark')
             elif proc.returncode == 0:
                 res.update(reason='nooutput')
             else:
