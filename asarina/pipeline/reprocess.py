@@ -128,7 +128,14 @@ class Archive:
         from asarina.config import load_config
         from asarina.pipeline.ingest import PhotometryPipeline
         cfg = load_config(self.config)
-        return PhotometryPipeline(phdb_root=cfg.get('phdb_root') or '/home/mates/phdb',
+        # the archive's imgproc args may put the ECSVs elsewhere
+        phdb_root = cfg.get('phdb_root')
+        for i, arg in enumerate(self.args):
+            if arg == '--phdb-root' and i + 1 < len(self.args):
+                phdb_root = self.args[i + 1]
+            elif arg.startswith('--phdb-root='):
+                phdb_root = arg.split('=', 1)[1]
+        return PhotometryPipeline(phdb_root=phdb_root or '/home/mates/phdb',
                                   phdb_date_fmt=cfg.get('phdb_date_fmt') or '%y%m',
                                   phdb_by_night=bool(cfg.get('phdb_by_night')))
 
