@@ -81,9 +81,11 @@ PROFILES = {
     # map no good (that night; the clear baseline moves with the aerosols).
     # Twilight frames left bright arcs at the map's edge.  Years of frames to
     # choose from: only those without the Moon (moonlit ones only add noise).
+    # No MAGZERO limit: the clear sky gives 18.96 in 2021-12, 18.6 in 2024-26,
+    # and the weight goes with the zeropoint anyway (1.3 mag down: 0.09).
     'makak': Profile('Makak', nside=8, scale=51.5, order=3,
                      bands={'N': ('G', 'G')},
-                     fwhm_max=6.0, dmagzero_max=0.03, magzero_min=18.45,
+                     fwhm_max=6.0, dmagzero_max=0.03,
                      sun_alt_max=-12.0, moon_alt_max=0.0, box=64,
                      # sky noise ~9400 per px (15.1 mag/px) after one night; the
                      # 0.5% cut fell at -8 sigma (edges, few frames): grey tiles
