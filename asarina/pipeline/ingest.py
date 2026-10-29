@@ -127,7 +127,7 @@ class PhotometryPipeline:
         # the next guess, so a moved camera heals itself.
         self.wcs_guess_dir = Path(wcs_guess_dir).expanduser() if wcs_guess_dir else None
         self.used_wcs_guess = False
-        self.wcs_guess_tonight = False
+        self.wcs_guess_fresh = False
         self.wcs_guess_keep = wcs_guess_keep
         self.min_idnum = min_idnum
 
@@ -441,10 +441,11 @@ class PhotometryPipeline:
         # refit cannot be verified, but the guess is the last verified solution
         # turned by the sidereal angle.  Photometry on it as it is, no refit;
         # the ECSV then has no ASTQUAL and the guess is not updated from it.
-        # Only a guess of the same night: the camera's tilt is changed by day,
-        # and a guess from before that would never verify again (the frame
-        # is field-solved instead).
-        if qual != 'OK' and self.wcs_guess_keep and self.used_wcs_guess and self.wcs_guess_tonight:
+        # Only a guess at most WCS_GUESS_KEEP_AGE away: the pointing departs
+        # from the sidereal turn (Makak: 0.06 deg in RA after 1 h, 0.15 after
+        # 2 h, 0.8 after 7 h), and the camera's tilt is changed by day.  An
+        # older guess matches the wrong stars (the frame is field-solved).
+        if qual != 'OK' and self.wcs_guess_keep and self.used_wcs_guess and self.wcs_guess_fresh:
             logger.warning(f"ASTQUAL={qual}, photometry on the WCS guess as it is")
             # the refit's frame would pass for the solution downstream
             (temp_dir / fits_file.replace('.fits', 't.fits')).unlink(missing_ok=True)
@@ -523,6 +524,8 @@ class PhotometryPipeline:
 
     # Sidereal rotation of the sky, degrees of RA per second of time
     SIDEREAL_DEG_PER_S = 360.98564736629 / 86400.0
+    # Photometry on an unverified guess only up to this far from it (s)
+    WCS_GUESS_KEEP_AGE = 3600.0
     # WCS keywords carried from one frame's solution to the next
     _WCS_GUESS_KEYS = ('WCSAXES', 'CTYPE', 'CUNIT', 'CRVAL', 'CRPIX', 'CD1_', 'CD2_',
                        'PV1_', 'PV2_', 'LONPOLE', 'LATPOLE', 'RADESYS', 'EQUINOX',
@@ -534,15 +537,10 @@ class PhotometryPipeline:
         from pyrt.utils.chip_id import get_camera_id
         return self.wcs_guess_dir / f"{get_camera_id(header)}.wcs"
 
-    @staticmethod
-    def _night(ctime: float) -> int:
-        """The night (noon to noon UT) of a CTIME"""
-        return int((ctime - 43200) // 86400)
-
     def _apply_wcs_guess(self, fits_path: Path) -> bool:
         """Put the last good solution, turned to this frame's time, into fits_path."""
         self.used_wcs_guess = False
-        self.wcs_guess_tonight = False
+        self.wcs_guess_fresh = False
         if self.wcs_guess_dir is None:
             return False
         try:
@@ -554,7 +552,7 @@ class PhotometryPipeline:
                 guess = fits.Header.fromtextfile(str(guess_file))
                 ctime = float(hdr['CTIME']) + hdr.get('USEC', 0) / 1e6
                 dt = ctime - float(guess['GUESSCT'])
-                self.wcs_guess_tonight = self._night(ctime) == self._night(float(guess['GUESSCT']))
+                self.wcs_guess_fresh = abs(dt) <= self.WCS_GUESS_KEEP_AGE
                 for key in list(guess.keys()):
                     if key.startswith(self._WCS_GUESS_KEYS):
                         hdr[key] = guess[key]
@@ -569,7 +567,7 @@ class PhotometryPipeline:
         return True
 
     def _store_wcs_guess(self, solved_path: Path) -> None:
-        """Keep solved_path's WCS as the guess for later frames (newest one wins)."""
+        """Keep solved_path's WCS as the guess for the frames processed next."""
         try:
             hdr = fits.getheader(str(solved_path))
             guess_file = self._wcs_guess_file(hdr)
@@ -582,16 +580,13 @@ class PhotometryPipeline:
                 if card.keyword.startswith(self._WCS_GUESS_KEYS):
                     out.append(card)
             guess_file.parent.mkdir(parents=True, exist_ok=True)
-            # Parallel workers finish out of order: the lock keeps an older
-            # frame from replacing a newer frame's solution of the same night.
-            # Another night's replaces it either way: going back through an
-            # archive (newest night first), each night starts its own.
+            # The last one solved wins, whichever way in time the frames go:
+            # going back through an archive (newest first) the next frame is
+            # the one before, and parallel workers finish only seconds apart.
+            # A newest-wins rule kept the night's last solution for the whole
+            # night there, hours off the sidereal turn.
             with open(guess_file.with_suffix('.lock'), 'w') as lock:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-                if guess_file.exists():
-                    old = float(fits.Header.fromtextfile(str(guess_file))['GUESSCT'])
-                    if old >= ctime and self._night(old) == self._night(ctime):
-                        return
                 tmp = guess_file.with_suffix('.tmp')
                 out.totextfile(str(tmp), overwrite=True)
                 os.replace(tmp, guess_file)
