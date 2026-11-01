@@ -16,6 +16,7 @@ rather than sit beside it.
 
 import argparse
 import logging
+import math
 import sys
 from datetime import datetime, timezone
 
@@ -30,6 +31,15 @@ _INSTRUMENTS = [('B', 1), ('V', 2), ('R', 3), ('I', 4),
 
 # obs rows are kept to 5 sigma (mk-img.py)
 MAX_MAGERR = 1.091 / 5
+
+# obs.mag and obs.dmag are numeric(5,3): |value| < 100
+MAX_ABS_MAG = 99.9
+
+
+def _good(mag, dmag):
+    """Row worth storing and representable in the database"""
+    return (math.isfinite(mag) and math.isfinite(dmag)
+            and abs(mag) < MAX_ABS_MAG and 0 < dmag < MAX_MAGERR)
 
 
 def connect(dbname=DBNAME):
@@ -93,9 +103,10 @@ def insert_ecsv(conn, ecsv_path):
                     (name, float(meta.get('EXPTIME', 0)), float(meta.get('JD', 0)),
                      meta.get('TARGET'), filter_name, _instrument(filter_name)))
         img_id = cur.fetchone()[0]
-        rows = [(float(r['ALPHA_J2000']), float(r['DELTA_J2000']),
-                 float(r['MAG_CALIB']), float(r['MAGERR_CALIB']), img_id)
-                for r in data if float(r['MAGERR_CALIB']) < MAX_MAGERR]
+        rows = [(float(r['ALPHA_J2000']), float(r['DELTA_J2000']), mag, dmag, img_id)
+                for r in data
+                for mag, dmag in [(float(r['MAG_CALIB']), float(r['MAGERR_CALIB']))]
+                if _good(mag, dmag)]
         if rows:
             execute_values(cur, "INSERT INTO obs (ra, dec, mag, dmag, img) VALUES %s", rows)
     conn.commit()
@@ -113,16 +124,25 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(message)s')
 
     conn = connect(args.dbname)
+    failed = 0
     try:
         for prefix in args.delete:
             if len(prefix) < 19:
                 sys.exit(f"--delete {prefix}: give the whole YYYYMMDDHHMMSS-mmm- prefix")
             logger.info(f"{prefix}: {delete_frame(conn, prefix)} deleted")
         for path in args.ecsv:
-            name, n = insert_ecsv(conn, path)
-            logger.info(f"{name}: {n} records")
+            # one bad file must not cost the rest of the list
+            try:
+                name, n = insert_ecsv(conn, path)
+                logger.info(f"{name}: {n} records")
+            except Exception as e:
+                conn.rollback()
+                failed += 1
+                logger.error(f"{path}: FAILED: {type(e).__name__}: {str(e).splitlines()[0]}")
     finally:
         conn.close()
+    if failed:
+        sys.exit(f"{failed} of {len(args.ecsv)} files failed")
 
 
 if __name__ == '__main__':
