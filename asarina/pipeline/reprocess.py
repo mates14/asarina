@@ -20,11 +20,14 @@ Failures are recoverable (a dark or flat may be supplied, the catalog come
 back, a crash be fixed) or not (no stars, no solution, a rejected one); the
 report says which, and lists the missing darks and flats.  "retry" puts
 chosen frames back in the queue, e.g. after making the missing darks.
+"reupload" repeats only the photometric DB step for the frames where it
+failed (the database was down, full, ...), and records how it went.
 
     asarina-reprocess run                     # the service
     asarina-reprocess report [--by year]
     asarina-reprocess list --reason nosolve --limit 20
     asarina-reprocess retry --reason nodark --chip andor46 --nights 20160101-20171231
+    asarina-reprocess reupload [--workers 4]
 
 Setup (~/.config/asarina/reprocess.ini):
 
@@ -529,7 +532,7 @@ def report(state, args):
         print(f"\nLast 24 h: {rows[0][0]} frames, {rows[0][1]:.0f} s per frame")
     rows = state.query("SELECT db, count(*) FROM frames WHERE db LIKE 'error%' GROUP BY db")
     if rows:
-        print("\nPhotometric DB errors:")
+        print("\nPhotometric DB errors (asarina-reprocess reupload retries them):")
         for db, n in rows:
             print(f"  {n:6d} {db[:100]}")
 
@@ -549,6 +552,78 @@ def retry(state, args):
     print(f"{n} frames back in the queue")
 
 
+def reupload(setup, args):
+    """The photometric DB step again, for the frames where it failed
+
+    Done frames are inserted from their ECSV (or deleted, if the db_* gate
+    rejects them), failed ones deleted, exactly as the run does; the frame's
+    db column gets the new outcome, so a repeated reupload only takes what
+    still fails.  The frames are not reprocessed."""
+    from collections import Counter
+    archives = {s.split(None, 1)[1]: Archive(s.split(None, 1)[1], setup[s])
+                for s in setup.sections() if s.startswith('archive ')}
+    rp = Reprocessor(setup, list(archives.values()))
+    rp.use_photdb = True
+
+    where, params = _where(args)
+    cond = (where + ' AND ' if where else ' WHERE ') + "db LIKE 'error%'"
+    rows = rp.state.query(f"SELECT path, archive, ecsv FROM frames{cond} "
+                          f"ORDER BY night DESC, name DESC", params)
+    if args.limit:
+        rows = rows[:args.limit]
+    logger.info(f"{len(rows)} frames to upload again, {args.workers} workers")
+
+    def one(a, path, ecsv):
+        try:
+            header, _ = _read_header(path)
+        except Exception as e:
+            return f"error: unreadable: {e}"
+        return rp._db_action(a, header, ecsv)
+
+    stop = []
+    signal.signal(signal.SIGINT, lambda *_: stop.append(1) or
+                  logger.info("stopping after the frames in progress"))
+    signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
+
+    counts = Counter()
+    todo = iter(rows)
+    running = {}
+    with ThreadPoolExecutor(args.workers) as pool:
+        while True:
+            while not stop and len(running) < 2 * args.workers:
+                row = next(todo, None)
+                if row is None:
+                    break
+                path, archive, ecsv = row
+                if archive not in archives:
+                    counts['no archive'] += 1
+                    continue
+                running[pool.submit(one, archives[archive], path, ecsv)] = path
+            if not running:
+                break
+            done, _ = wait(running, return_when=FIRST_COMPLETED)
+            for fut in done:
+                path = running.pop(fut)
+                try:
+                    db = fut.result()
+                except Exception as e:
+                    db = f"error: {e}"
+                rp.state.execute("UPDATE frames SET db=? WHERE path=?", (db, path))
+                kind = db.split(':')[0].split()[0] if db else 'none'
+                counts[kind] += 1
+                if kind == 'error':
+                    logger.error(f"{os.path.basename(path)}: {db[:200]}")
+                n = sum(counts.values())
+                if n % 500 == 0:
+                    logger.info(f"{n}/{len(rows)}: {dict(counts)}")
+
+    left = len(rows) - sum(counts.values())
+    logger.info(f"{'stopped' if stop else 'finished'}: {dict(counts)}"
+                f"{f', {left} not attempted' if left else ''}")
+    if counts['error']:
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0],
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -557,7 +632,8 @@ def main():
     sub.add_parser('run', help='process the archives (the service)')
     for name, hlp in (('report', 'counts, failures, missing calibrations'),
                       ('list', 'frames matching the filters'),
-                      ('retry', 'put matching frames back in the queue')):
+                      ('retry', 'put matching frames back in the queue'),
+                      ('reupload', 'the photometric DB step again where it failed')):
         p = sub.add_parser(name, help=hlp)
         p.add_argument('--archive')
         p.add_argument('--chip', help='camera id (andor46, mi6166, ...)')
@@ -570,6 +646,10 @@ def main():
             p.add_argument('--by', choices=['year', 'ccd', 'chip', 'night'])
         if name == 'list':
             p.add_argument('--limit', type=int, default=50)
+        if name == 'reupload':
+            p.add_argument('--limit', type=int, help='at most this many frames')
+            p.add_argument('--workers', type=int, default=4,
+                           help='parallel DB connections (default 4)')
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
@@ -579,6 +659,10 @@ def main():
         sys.exit(f"cannot read {args.setup}")
     if 'reprocess' not in setup:
         setup['reprocess'] = {}
+
+    if args.cmd == 'reupload':
+        reupload(setup, args)
+        return
 
     if args.cmd == 'run':
         archives = [Archive(s.split(None, 1)[1], setup[s]) for s in setup.sections()
