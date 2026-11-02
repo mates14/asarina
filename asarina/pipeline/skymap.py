@@ -63,17 +63,29 @@ class Profile:
         self.edge = edge                # frame px over which the weight fades in from the edge
         self.box = box                  # background grid, frame px
         self.title = title              # HiPS obs_title of a band
-        self.pixel_cut = pixel_cut      # Hipsgen pixelCut of the PNG tiles
+        self.pixel_cut = pixel_cut      # Hipsgen pixelCut of the PNG tiles, or {band: pixelCut}
 
     def band_names(self):
         return sorted({band for band, _ in self.bands.values()})
+
+    def cut(self, band):
+        """Hipsgen pixelCut of a band's PNG tiles"""
+        return self.pixel_cut[band] if isinstance(self.pixel_cut, dict) else self.pixel_cut
 
 
 PROFILES = {
     'sbt': Profile('SBT', nside=64, scale=3.14, order=7,
                    bands={f'Sloan_{b}': (b, f'Sloan_{b}') for b in 'gri'},
                    fwhm_max=2.5, dmagzero_max=0.05, box=256,          # 256 px ~13'
-                   title='{name} Sloan {band}'),
+                   title='{name} Sloan {band}',
+                   # pyrt-f2cj's stretch fitted once on the whole map (2026-11,
+                   # 300 random order-7 tiles a band): q10/q50/q90/q99.95 to grey
+                   # 1/32/64/255 gives (x - C)^B with B = 0.47-0.50 in all bands,
+                   # i.e. a sqrt from C (just under q10) to where it reaches 255.
+                   # The 0.5%/99.5% asinh cut put the black 47 sigma under the
+                   # sky (rare deep negatives): sky at grey 220.
+                   pixel_cut={'g': '-58 5900 sqrt', 'r': '-73 8200 sqrt',
+                              'i': '-122 11600 sqrt'}),
     # Makak: 57"/px, no filter, calibrated to Gaia G; FWHM 3-6 px.  Tiles at
     # 51.5" (HiPS order 3), 7.3 deg cells; 64 px background boxes (1 deg) follow
     # the moonlit sky.  A clear sky has a zeropoint ~18.6 (2026-10), 18.57 on
@@ -89,7 +101,9 @@ PROFILES = {
                      sun_alt_max=-12.0, moon_alt_max=0.0, box=64,
                      # sky noise ~9400 per px (15.1 mag/px) after one night; the
                      # 0.5% cut fell at -8 sigma (edges, few frames): grey tiles
-                     pixel_cut='-20000 300000 asinh'),
+                     # f2cj stretch fitted on the whole map (2026-11, as for SBT): B = 0.50,
+                     # a sqrt; '-20000 300000 asinh' had left the sky at grey 138, now ~22
+                     pixel_cut='-6000 750000 sqrt'),
 }
 SBT = PROFILES['sbt']
 
@@ -542,7 +556,7 @@ def hips(mapdir, exportdir, hipsdir, jar, memory, threads, prof=SBT):
                       f'id=ASU/P/{prof.name}/{band}',
                       f'obs_title={prof.title.format(name=prof.name, band=band)}',
                       f'order={prof.order}',
-                      'mode=overlayMean', f'maxthread={threads}', f'pixelCut={prof.pixel_cut}']):
+                      'mode=overlayMean', f'maxthread={threads}', f'pixelCut={prof.cut(band)}']):
             built.append(band)
         else:
             ok = False
