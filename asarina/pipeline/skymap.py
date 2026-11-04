@@ -563,10 +563,88 @@ def hips(mapdir, exportdir, hipsdir, jar, memory, threads, prof=SBT):
 
     colors = [f'{key}={hipsdir}/{band}' for key, band in RGB if band in built]
     if len(colors) >= 2:
-        ok &= run('gri', colors + [f'out={hipsdir}/gri', 'id=ASU/P/SBT/gri',
-                                   f'obs_title=SBT {"".join(b for _, b in RGB[::-1] if b in built)}',
-                                   f'maxthread={threads}', 'RGB'])
+        if run('gri', colors + [f'out={hipsdir}/gri', 'id=ASU/P/SBT/gri',
+                                f'obs_title=SBT {"".join(b for _, b in RGB[::-1] if b in built)}',
+                                f'maxthread={threads}', 'RGB']):
+            logger.info(f"gri repainted: {color(hipsdir, threads, prof)} tiles")
+        else:
+            ok = False
     return ok
+
+
+# --- color ---------------------------------------------------------------------
+#
+# Hipsgen's RGB leaves a band that has no data black, so wherever the map lacks
+# a band the color HiPS turns green, magenta or yellow.  It is only for looking
+# at, so `color` repaints its PNG tiles from the bands' FITS tiles, per pixel by
+# the bands there: all three as they are (i red, r green, g blue); two as blue
+# (the bluer) and red (the redder), their mean green; one as grey.
+
+_TRANSFER = {'linear': lambda t: t, 'sqrt': np.sqrt, 'pow2': np.square}
+
+
+def _grey(cut):
+    """grey 0..255 of a band's flux by its numeric pixelCut 'lo hi [function]',
+    as Hipsgen draws the band's PNG tiles"""
+    lo, hi, *fn = cut.split()
+    lo, hi, f = float(lo), float(hi), _TRANSFER[(fn or ['linear'])[0].lower()]
+    return lambda x: 255 * f(np.clip((x - lo) / (hi - lo), 0, 1))
+
+
+def _mix(planes):
+    """RGBA uint8 of the band planes (grey, NaN where missing), blue to red"""
+    v = np.stack(planes)
+    have = ~np.isnan(v)
+    n = have.sum(0)
+    blue = np.take_along_axis(v, have.argmax(0)[None], 0)[0]
+    red = np.take_along_axis(v, (len(v) - 1 - have[::-1].argmax(0))[None], 0)[0]
+    green = np.where(n == len(v), v[len(v) // 2], (blue + red) / 2)
+    rgba = np.stack([red, green, blue, np.where(n > 0, 255.0, 0.0)], -1)
+    return np.nan_to_num(np.rint(rgba), nan=0).astype(np.uint8)
+
+
+def _paint(args):
+    """one gri PNG from the bands' FITS (which are upside down to the PNG)"""
+    out, sources = args
+    from astropy.io import fits
+    from PIL import Image
+    planes, shape = [], None
+    for path, cut in sources:
+        if path is not None and path.exists():
+            data = fits.getdata(path).astype(np.float32)[::-1]
+            shape = data.shape
+            planes.append(_grey(cut)(data))
+        else:
+            planes.append(None)
+    if shape is None:
+        return 0
+    planes = [np.full(shape, np.nan, np.float32) if p is None else p for p in planes]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + '.tmp')
+    Image.fromarray(_mix(planes), 'RGBA').save(tmp, 'PNG')
+    os.replace(tmp, out)
+    return 1
+
+
+def color(hipsdir, threads=8, prof=SBT, out='gri'):
+    """repaint the color HiPS <hipsdir>/<out> from the band HiPS (see above);
+    number of tiles written"""
+    from multiprocessing import Pool
+    hipsdir = Path(hipsdir)
+    bands = [b for _, b in RGB[::-1] if (hipsdir / b / 'properties').exists()]
+    names = set()
+    for b in bands:
+        names.update(p.relative_to(hipsdir / b).with_suffix('')
+                     for p in (hipsdir / b).glob('Norder*/Dir*/Npix*.fits'))
+        names.update(p.relative_to(hipsdir / b).with_suffix('')
+                     for p in (hipsdir / b).glob('Norder*/Allsky.fits'))
+    # a band missing from the HiPS altogether stays a missing plane in every tile
+    jobs = [(hipsdir / out / f'{name}.png',
+             [(hipsdir / b / f'{name}.fits' if b in bands else None, prof.cut(b))
+              for _, b in RGB[::-1]])
+            for name in sorted(names)]
+    with Pool(threads) as pool:
+        return sum(pool.imap_unordered(_paint, jobs, chunksize=64))
 
 
 def main():
@@ -584,6 +662,9 @@ def main():
     p.add_argument('--dir', required=True, help='map directory')
     p.add_argument('--out', required=True, help='Hipsgen input directory')
     p.add_argument('--band', action='append')
+    p = sub.add_parser('color', help='repaint the gri color HiPS from the band HiPS')
+    p.add_argument('--hips', default=f'{ROOT}/hips', help='HiPS directory (default: %(default)s)')
+    p.add_argument('--threads', type=int, default=8, help='(default: %(default)s)')
     p = sub.add_parser('hips', help='full rebuild: export, HiPS per band and gri color HiPS')
     p.add_argument('--dir', default=f'{ROOT}/skymap', help='map directory (default: %(default)s)')
     p.add_argument('--export', default=f'{ROOT}/export',
@@ -608,6 +689,8 @@ def main():
     elif args.cmd == 'export':
         n = export(args.dir, args.out, args.band or prof.band_names())
         logger.info(f"{n} tiles exported")
+    elif args.cmd == 'color':
+        logger.info(f"{color(args.hips, args.threads, prof)} tiles repainted")
     else:
         sys.exit(0 if hips(args.dir, args.export, args.hips, args.jar,
                            args.memory, args.threads, prof) else 1)
