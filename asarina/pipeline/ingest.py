@@ -321,6 +321,10 @@ class PhotometryPipeline:
         solve_cmd = ["pyrt-field-solve"]
         if scale is not None:
             solve_cmd += ["--scale", str(scale)]
+        if self.dophot_zpn_from_camera:
+            # start the first dophot pass from the camera model anchored to the
+            # astrometry.net stars, not from its TAN (off by px on a wide chip)
+            solve_cmd.append("-K")
         solve_cmd.append(fits_file)
 
         t = time.time()
