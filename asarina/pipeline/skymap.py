@@ -48,7 +48,8 @@ class Profile:
     """A camera's map: its tiling, bands and which frames go to it"""
 
     def __init__(self, name, nside, scale, order, bands, fwhm_max, dmagzero_max,
-                 magzero_min=None, sun_alt_max=None, moon_alt_max=None, edge=30, box=256,
+                 magzero_min=None, sun_alt_max=None, moon_alt_max=None, planets=None,
+                 edge=30, box=256,
                  title='{name} {band}', pixel_cut='0.5% 99.5% asinh'):
         self.name = name
         self.nside = nside              # HEALPix nside of the tiles
@@ -60,6 +61,7 @@ class Profile:
         self.magzero_min = magzero_min  # clouds: below this zeropoint the frame stays out
         self.sun_alt_max = sun_alt_max  # twilight: deg, with the Sun higher the frame stays out
         self.moon_alt_max = moon_alt_max    # moonlight: deg, with the Moon higher the frame stays out
+        self.planets = planets or {}    # {body: deg}: frame pixels that close to it stay out
         self.edge = edge                # frame px over which the weight fades in from the edge
         self.box = box                  # background grid, frame px
         self.title = title              # HiPS obs_title of a band
@@ -99,6 +101,12 @@ PROFILES = {
                      bands={'N': ('G', 'G')},
                      fwhm_max=6.0, dmagzero_max=0.03,
                      sun_alt_max=-12.0, moon_alt_max=0.0, box=64,
+                     # bright planets move: over many nights they would leave
+                     # a bright trace through the map, so 2 deg around them
+                     # (saturation, halo, ghosts) take no weight; Uranus is a
+                     # ~5.7 mag star, it only needs its own image masked
+                     planets={'venus': 2.0, 'mars': 2.0, 'jupiter': 2.0,
+                              'saturn': 2.0, 'uranus': 0.3},
                      # sky noise ~9400 per px (15.1 mag/px) after one night; the
                      # 0.5% cut fell at -8 sigma (edges, few frames): grey tiles
                      # f2cj stretch fitted on the whole map (2026-11, as for SBT): B = 0.50,
@@ -211,6 +219,40 @@ def body_altitude(meta, body='sun'):
                          height=float(meta.get('ALTITUDE', 0)) * u.m)
     t = Time(float(meta['JD']), format='jd')
     return float(get_body(body, t, site).transform_to(AltAz(obstime=t, location=site)).alt.deg)
+
+
+def planet_mask(meta, wcs, shape, planets):
+    """Frame pixels closer than planets[body] deg to any of the bodies (True),
+    None if no body comes near the frame"""
+    from astropy.coordinates import EarthLocation, SkyCoord, get_body
+    from astropy.time import Time
+    import astropy.units as u
+    if not planets:
+        return None
+    ny, nx = shape
+    site = EarthLocation(lat=float(meta['LATITUDE']) * u.deg, lon=float(meta['LONGITUD']) * u.deg,
+                         height=float(meta.get('ALTITUDE', 0)) * u.m)
+    t = Time(float(meta['JD']), format='jd')
+    # the frame on a coarse grid; the separation is smooth enough in between
+    gy = np.unique(np.append(np.arange(0, ny, GRID), ny - 1)).astype(float)
+    gx = np.unique(np.append(np.arange(0, nx, GRID), nx - 1)).astype(float)
+    cy, cx = np.meshgrid(gy, gx, indexing='ij')
+    ra, dec = wcs.all_pix2world(cx.ravel(), cy.ravel(), 0)
+    grid = SkyCoord(ra * u.deg, dec * u.deg)
+    ok = np.isfinite(ra) & np.isfinite(dec)
+    mask = None
+    for body, radius in planets.items():
+        # the topocentric direction: GCRS axes are the ICRS ones (no .icrs,
+        # that would move the planet to the barycentre, degrees off)
+        c = get_body(body, t, site)
+        c = SkyCoord(c.ra, c.dec)
+        sep = np.where(ok, grid.separation(c).deg, 180.0).reshape(cx.shape)
+        if sep.min() > radius + 1.0:        # nowhere near (grid step << 1 deg)
+            continue
+        near = _Smooth(gy, gx, sep).grid(np.arange(ny, dtype=float),
+                                         np.arange(nx, dtype=float)) < radius
+        mask = near if mask is None else mask | near
+    return mask
 
 
 def frame_wcs(meta):
@@ -453,13 +495,18 @@ def add_frame(fits_path, ecsv_path, mapdir, prof=SBT):
     data -= _background(data, good, prof.box).grid(rows, cols)
     # cold pixels: nothing on the sky is that far below the background
     good &= data > -5 * float(meta['BGSIGMA'])
+    # the planets' surroundings stay out of the map (not out of the background,
+    # which follows their glow beyond)
+    fwcs = frame_wcs(meta)
+    near = planet_mask(meta, fwcs, data.shape, prof.planets)
+    if near is not None:
+        good &= ~near
     zp = _zeropoint(meta, mag_ref, data.shape, prof.box)
     data *= 10 ** (0.4 * (ZP - zp.grid(rows, cols)))
     data[~good] = np.nan
     sigma_scale = _Smooth(zp.gy, zp.gx, float(meta['BGSIGMA']) *
                           10 ** (0.4 * (ZP - zp.grid(zp.gy, zp.gx))))
 
-    fwcs = frame_wcs(meta)
     added = 0
     for ipix in _candidate_tiles(fwcs, data.shape, prof):
         hdr = tile_header(int(ipix), prof)
