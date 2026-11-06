@@ -17,6 +17,13 @@ from asarina.pipeline.image import ImageProcessor
 
 logger = logging.getLogger(__name__)
 
+# smart-dark (Makak) frames: raw ADU at which the 16-bit camera is saturated,
+# and the saturated fraction above which the frame is not even solved.  With
+# the Moon in the field the whole frame sits at 65535; its "BGSIGMA" was then
+# the dark model's pixel pattern and the nightly graph showed a moderate sky.
+RAW_SATURATION = 65000
+SATFRAC_MAX = 0.5
+
 
 class PhotometryPipeline:
     """Complete photometry pipeline from raw images to ECSV catalogs."""
@@ -138,8 +145,8 @@ class PhotometryPipeline:
         self.calibrated = None
 
         # Why the last phase failed, None while all went well: 'nodark',
-        # 'noflat', 'unreadable', 'notobject' (calibrate), 'nostars',
-        # 'nosolve' (solve), 'catalog', 'dophot', 'astqual', 'idnum'
+        # 'noflat', 'unreadable', 'notobject' (calibrate), 'saturated',
+        # 'nostars', 'nosolve' (solve), 'catalog', 'dophot', 'astqual', 'idnum'
         # (photometry).  asarina-imgproc exits with a code for each.
         self.failure = None
 
@@ -201,6 +208,7 @@ class PhotometryPipeline:
         """
         import numpy as np
         from asarina.calib.smart_dark import smart_dark, image_bgsigma
+        from scipy.ndimage import binary_dilation
         from pyrt.utils.chip_id import load_chip_id
         from asarina.pipeline.image import CAMERA_CROPS
 
@@ -217,19 +225,30 @@ class PhotometryPipeline:
 
             corrected, corr_temp = smart_dark(data, self.smart_dark_calib,
                                               initial_temp=temp)
+            # saturated in the raw frame (the Moon in the field: all of it)
+            saturated = data >= RAW_SATURATION
 
             # Camera crop (full-frame readouts only)
             chip = load_chip_id(header)
             crop = CAMERA_CROPS.get(chip)
             if crop is not None:
                 corrected = corrected[crop]
+                saturated = saturated[crop]
                 if 'CRPIX1' in header:
                     header['CRPIX1'] -= crop[1].start
                 if 'CRPIX2' in header:
                     header['CRPIX2'] -= crop[0].start
 
             header['CCD_TEMP'] = float(corr_temp)
-            header['BGSIGMA'] = image_bgsigma(corrected)
+            header['SATFRAC'] = (round(float(saturated.mean()), 4),
+                                 'fraction of the pixels saturated (raw)')
+            # the noise of the unsaturated sky only; none at all (FITS takes
+            # no NaN): no BGSIGMA, the failure summary writes nan
+            bgsigma = image_bgsigma(corrected, binary_dilation(saturated, iterations=2))
+            if np.isfinite(bgsigma):
+                header['BGSIGMA'] = bgsigma
+            else:
+                header.remove('BGSIGMA', ignore_missing=True)
 
             datum = datetime.utcfromtimestamp(c_time)
             datestr = datum.strftime("%Y%m%d%H%M%S")
@@ -282,6 +301,14 @@ class PhotometryPipeline:
 
         Returns True on success.
         """
+        # Overexposed (the Moon in the field): nothing to detect or solve,
+        # field-solve would only fail after seconds
+        satfrac = float(fits.getheader(str(temp_dir / fits_file)).get('SATFRAC', 0))
+        if satfrac > SATFRAC_MAX:
+            self.failure = 'saturated'
+            logger.error(f"saturated: {satfrac:.0%} of the frame (SATFRAC > {SATFRAC_MAX})")
+            return False
+
         # Source detection
         t = time.time()
         phcat_cmd = ["pyrt-phcat"]
@@ -703,7 +730,7 @@ class PhotometryPipeline:
             datestr = datetime.utcfromtimestamp(ctime - 43200).strftime("%Y%m%d")
             self.daily_summary_dir.mkdir(parents=True, exist_ok=True)
             with open(self.daily_summary_dir / f"mr{datestr}f.dat", 'a') as f:
-                f.write(f"{ctime + hdr.get('USEC', 0) / 1e6:.6f} {hdr.get('BGSIGMA', 0):.3f} "
+                f.write(f"{ctime + hdr.get('USEC', 0) / 1e6:.6f} {hdr.get('BGSIGMA', float('nan')):.3f} "
                         f"{hdr.get('CCD_TEMP', 0):.3f} {self.failure}\n")
         except Exception as e:
             logger.warning(f"Could not write failure summary: {e}")

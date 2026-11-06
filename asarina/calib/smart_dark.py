@@ -65,15 +65,23 @@ def smart_dark(image, calibration_path, initial_temp=20.0):
     return apply_dark_correction(image, calibration, optimal_temp), optimal_temp
 
 
-def image_bgsigma(data):
+def image_bgsigma(data, bad=None):
     """Estimate background noise as median of row-wise median absolute differences.
 
     Robust to stars and gradients; used both for dark quality assessment and as
     the BGSIGMA header keyword written into calibrated science frames.
+    bad (bool, as data) leaves pixels out, e.g. the saturated ones: a saturated
+    sky is flat and its "noise" would be the dark model's pixel pattern.  NaN
+    when nothing is left.
     """
+    import warnings
+    if bad is not None:
+        data = np.where(bad, np.nan, data)
     ndiff = []
-    for i in range(len(data) - 1):
-        d = np.nanmedian(np.abs(np.float32(data[i]) - np.float32(data[i + 1])))
-        if not np.isnan(d):
-            ndiff.append(d)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)     # all-NaN rows
+        for i in range(len(data) - 1):
+            d = np.nanmedian(np.abs(np.float32(data[i]) - np.float32(data[i + 1])))
+            if not np.isnan(d):
+                ndiff.append(d)
     return float(np.nanmedian(ndiff)) if ndiff else float('nan')

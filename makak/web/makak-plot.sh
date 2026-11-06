@@ -2,7 +2,8 @@
 # makak-plot.sh NGHT/mrYYYYMMDD.dat: the night's graph, as makak-reloaded's
 # bin/makak-plot.sh on zeus drew it from its reprocessing.  Zeropoint, sky
 # brightness (BGSIGMA less the camera's dark noise D(T), fitted on the darks of
-# mrYYYYMMDDd.dat), CLOUD from D50's meteo log, CCD and ambient temperature.
+# mrYYYYMMDDd.dat; frames that failed: mrYYYYMMDDf.dat, the overexposed ones
+# - the Moon in the field - at the top edge), CLOUD from D50's meteo log, CCD and ambient temperature.
 # Writes mrYYYYMMDD.png and uploads it as makak/makak.png and
 # makak/mrpng/mrYYYYMMDD.png, the night's mr*.dat to makak/dat/.
 # NOUPLOAD=1 only plots.
@@ -77,7 +78,8 @@ set label "$night" center at graph 0.5,0.9 font 'arial,32'
 
 plot "$file" u (t(\$2)):(\$9<dz?\$8:NaN) pt 7 ps 0.7 lt rgb "#dd3333" t "Zeropoint",\
  "$file" u (t(\$2)):(sky(\$14,\$15)) pt 7 ps 0.7 lt rgb "#3333dd" t "sky (mag/arcsec2)",\
- "< cat $ffile 2>/dev/null" u (ts(\$1)):(sky(\$2,\$3)) pt 7 ps 0.7 lt rgb "#3333dd" t "",\
+ "< grep -v saturated $ffile 2>/dev/null" u (ts(\$1)):(sky(\$2,\$3)) pt 7 ps 0.7 lt rgb "#3333dd" t "",\
+ "< grep saturated $ffile 2>/dev/null" u (ts(\$1)):(13.8) pt 9 ps 1.0 lt rgb "#cc9900" t "saturated (Moon)",\
  "cloud$$.dat" u (ts(\$1)):2 pt 7 ps 0.7 lt rgb "#33aa33" t "cloud" axes x1y2
 
 unset label

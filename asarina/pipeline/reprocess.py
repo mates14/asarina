@@ -74,7 +74,7 @@ SETUP_FILE = '~/.config/asarina/reprocess.ini'
 NON_SCIENCE = {'darks', 'flats', 'masterdarks', 'masterflats'}
 
 RECOVERABLE = {'nodark', 'noflat', 'catalog', 'dophot', 'crash', 'timeout', 'nooutput'}
-IRRECOVERABLE = {'unreadable', 'nostars', 'nosolve', 'astqual', 'idnum'}
+IRRECOVERABLE = {'unreadable', 'saturated', 'nostars', 'nosolve', 'astqual', 'idnum'}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS nights (

@@ -56,6 +56,7 @@ EXIT_CODES = {
     'noflat':     21,
     'unreadable': 22,
     'notobject':  23,
+    'saturated':  24,
     'nostars':    30,
     'nosolve':    31,
     'catalog':    32,
