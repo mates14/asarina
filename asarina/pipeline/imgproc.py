@@ -483,6 +483,10 @@ def main():
     output.add_argument('--png-root', default='/home/mates/png')
     output.add_argument('--kinseries-dir', metavar='DIR',
                         help='real time: queue kinetic series here for asarina-kinseries')
+    output.add_argument('--kinseries-frames', action='store_true',
+                        help='also queue short frames of trigger targets (SBT C1+C2)')
+    output.add_argument('--kinseries-max-exptime', type=float, default=15.0, metavar='S',
+                        help='longest frame queued with --kinseries-frames (default: %(default)s)')
     output.add_argument('--daily-summary', metavar='DIR', dest='daily_summary_dir',
                         help='Directory for nightly summary .dat files')
     output.add_argument('--stat-dir', metavar='DIR', dest='stat_dir',
@@ -801,7 +805,9 @@ def main():
         if ecsv_path is not None and args.realtime and args.kinseries_dir:
             try:
                 from asarina.pipeline.kinseries import queue_job
-                job = queue_job(args.kinseries_dir, raw_header, raw_path, ecsv_path)
+                job = queue_job(args.kinseries_dir, raw_header, raw_path, ecsv_path,
+                                calibrated=calibrated, frames=args.kinseries_frames,
+                                max_exptime=args.kinseries_max_exptime)
                 if job:
                     logger.info(f"Kinetic series queued: {job}")
             except Exception as e:

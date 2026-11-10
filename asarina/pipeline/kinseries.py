@@ -1,23 +1,30 @@
 #!/usr/bin/env python3
 """
-kinseries - real-time runner of the progressive kinetic-series light curve (kinstep).
+kinseries - real-time runner of the progressive light curve of a GRB/EP sequence.
 
-asarina-imgproc, having saved the ECSV of a kinetic series (ACQMODE 3, KINNUM >= 12,
-KINFILE), drops a job into <dir>/spool/ and starts this runner (as the pipeline user,
+Two kinds of input, both from asarina-imgproc once it has saved a frame's ECSV:
+  - kinetic series (D50 C0: ACQMODE 3, KINNUM >= 12, KINFILE): the sub-frames, kinstep.py,
+  - short frames (SBT C1+C2, config kinseries_frames: a trigger target, EXPTIME <=
+    kinseries_max_exptime): imgproc copies the calibrated frame along, framestep.py.
+
+imgproc drops a job into <dir>/spool/ and starts this runner (as the pipeline user,
 detached, in its own session).  Only one runner works at a time (flock on <dir>/lock);
 a second one exits at once.  With nothing to do for --idle seconds the runner exits;
 the next kinetic series starts it again.
 
-The runner groups the series by observation (OBSID, filter): with n series of an
-observation in, it runs the newest "trivial" step k <= n not done yet (k = 1, 2, 3, 4, 6,
-12, see kinstep.py) - a step that has gone stale while an earlier one was running is
+The runner groups the jobs by observation (OBSID, filter; C1 and C2 of SBT together).
+Kinetic series: with n series in, it runs the newest "trivial" step k <= n not done yet
+(k = 1, 2, 3, 4, 6, 12, see kinstep.py).  Frames: with n frames in, step k = n // 12
+(12 bins of k frames).  A step that has gone stale while an earlier one was running is
 skipped, the newest data are what matters.  After a step, the flare search
 (pyrt-transients --flare-rec) runs on its bins in the background.
 
 Layout of <dir> (config key kinseries_dir, e.g. /home/mates/kinseries):
   spool/<stem>.json                 jobs from imgproc
   obs/<YYYYMMDD>-<obsid>-<filter>/  one per observation:
-      series/<stem>.json            its series (the jobs, moved here)
+      series/<stem>.json            its series or frames (the jobs, moved here)
+      frames/<stem>.fits            the calibrated frames (frame jobs; removed when the
+                                    observation is over)
       state.json                    steps done / failed / reported
       step<kk>/                     kinstep output: per-bin ECSVs, deep ECSV, step.json,
                                     kinstep.log, transients.log, flares.txt
@@ -44,32 +51,47 @@ log = logging.getLogger("kinseries")
 
 TRIVIAL = (1, 2, 3, 4, 6, 12)
 POINTS = 12
+MAX_FRAME_STEP = 12   # frames: up to 12 x 12 frames (12 min of SBT 5 s frames)
 RAW_WAIT = 120        # [s] how long a series may wait for its raw frame to be archived
 OBS_ACTIVE = 4 * 3600  # [s] observations untouched for longer are not looked at
 
 
 # ---------------------------------------------------------------- jobs
 
-def queue_job(root, hdr, raw_path, ecsv_path):
-    """Called by imgproc: drop a job for a kinetic series, start the runner.
-    Returns the job path, or None when the frame is not a kinetic series."""
-    acq = str(hdr.get('ACQMODE', '')).strip().lower()
-    if acq not in ('3', 'kinetic series', 'kinetics'):
-        return None
-    kinnum = int(hdr.get('KINNUM') or 0)
-    if kinnum < POINTS or not hdr.get('KINFILE') or not hdr.get('KINCYCLE'):
-        return None
+def is_trigger(hdr):
+    """A GRB/EP/... trigger target: RTS2 type G, or the trigger position in the header."""
+    return str(hdr.get('TARTYPE', '')).strip().upper() == 'G' or hdr.get('GRB_RA') is not None
+
+
+def queue_job(root, hdr, raw_path, ecsv_path, calibrated=None, frames=False, max_exptime=15.0):
+    """Called by imgproc: drop a job for a kinetic series (or, with frames=True, a short
+    frame of a trigger target, whose calibrated image is copied along), start the runner.
+    Returns the job path, or None when the frame is neither."""
     stem = os.path.basename(str(raw_path))[:18]
     job = {
-        'stem': stem, 'raw': str(raw_path), 'ecsv': str(ecsv_path), 'kinfile': hdr['KINFILE'],
+        'stem': stem, 'raw': str(raw_path), 'ecsv': str(ecsv_path),
         'obsid': int(hdr.get('OBSID') or 0), 'target': hdr.get('TARGET'),
         'object': str(hdr.get('OBJECT', '')), 'filter': str(hdr.get('FILTER', 'UNK')),
-        'kinnum': kinnum, 'kincycle': float(hdr['KINCYCLE']),
         'ctime': float(hdr.get('CTIME', 0)) + float(hdr.get('USEC', 0)) / 1e6,
-        'ccd': hdr.get('CCD_NAME'), 'queued': time.time(),
+        'exptime': float(hdr.get('EXPTIME', 0)), 'ccd': hdr.get('CCD_NAME'), 'queued': time.time(),
     }
     spool = os.path.join(root, 'spool')
-    os.makedirs(spool, exist_ok=True)
+    acq = str(hdr.get('ACQMODE', '')).strip().lower()
+    kinnum = int(hdr.get('KINNUM') or 0)
+    if acq in ('3', 'kinetic series', 'kinetics'):
+        if kinnum < POINTS or not hdr.get('KINFILE') or not hdr.get('KINCYCLE'):
+            return None
+        job.update(kind='kinetic', kinfile=hdr['KINFILE'], kinnum=kinnum, kincycle=float(hdr['KINCYCLE']))
+        os.makedirs(spool, exist_ok=True)
+    elif frames and calibrated and is_trigger(hdr) and 0 < job['exptime'] <= max_exptime:
+        job['kind'] = 'frame'
+        os.makedirs(spool, exist_ok=True)
+        tmp = os.path.join(spool, f".{stem}.fits.tmp")
+        shutil.copyfile(str(calibrated), tmp)
+        os.replace(tmp, os.path.join(spool, f"{stem}.fits"))
+        job['fits'] = os.path.join(spool, f"{stem}.fits")   # moved with the job (ingest)
+    else:
+        return None
     tmp = os.path.join(spool, f".{stem}.tmp")
     with open(tmp, 'w') as f:
         json.dump(job, f)
@@ -121,9 +143,18 @@ def ingest(root):
         hits = glob.glob(os.path.join(root, 'obs', f"*-{key}"))
         obs = hits[0] if hits else os.path.join(root, 'obs', f"{job['stem'][:8]}-{key}")
         os.makedirs(os.path.join(obs, 'series'), exist_ok=True)
+        if job.get('kind') == 'frame':
+            os.makedirs(os.path.join(obs, 'frames'), exist_ok=True)
+            dst = os.path.join(obs, 'frames', os.path.basename(job['fits']))
+            if os.path.exists(job['fits']):
+                os.replace(job['fits'], dst)
+            job['fits'] = dst
+            _save(path, job)
+            log.info(f"{os.path.basename(obs)}: frame {job['stem']} {job['ccd']} ({job['object']}, {job['exptime']:g} s)")
+        else:
+            log.info(f"{os.path.basename(obs)}: series {job['stem']} ({job['object']}, "
+                     f"{job['kinnum']} x {job['kincycle']:.3f} s)")
         os.replace(path, os.path.join(obs, 'series', f"{job['stem']}.json"))
-        log.info(f"{os.path.basename(obs)}: series {job['stem']} ({job['object']}, "
-                 f"{job['kinnum']} x {job['kincycle']:.3f} s)")
         n += 1
     return n
 
@@ -131,6 +162,8 @@ def ingest(root):
 def raw_ready(job):
     """The raw frame (archived by RTS2 after imgproc's corrwerr) and the KINFILE exist."""
     from asarina.pipeline.kinphot import find_raw
+    if job.get('kind') == 'frame':
+        return os.path.exists(job['fits'])
     if job['raw'].endswith('-kin.fits'):
         return os.path.exists(job['raw'])   # a cube (offline tests)
     if not (os.path.exists(job['raw']) or find_raw(job['stem'])):
@@ -141,8 +174,11 @@ def raw_ready(job):
 
 # ---------------------------------------------------------------- steps
 
-def due_step(nseries, state):
+def due_step(nseries, state, kind='kinetic'):
     done = state.get('done', []) + state.get('failed', [])
+    if kind == 'frame':
+        k = min(nseries // POINTS, MAX_FRAME_STEP)
+        return k if k >= 1 and k > max(done, default=0) else None
     avail = [k for k in TRIVIAL if k <= nseries]
     if not avail:
         return None
@@ -153,18 +189,26 @@ def due_step(nseries, state):
 
 
 def run_step(obs, series, k, args):
-    """kinstep on the first k series of the observation; True if it produced bins."""
+    """kinstep on the first k series of the observation (framestep on its first 12k
+    frames); True if it produced bins."""
     out = os.path.join(obs, f"step{k:02d}")
     if os.path.isdir(out):
         shutil.rmtree(out)
     os.makedirs(out)
-    nsub = min(j['kinnum'] for j in series[:k]) // POINTS * POINTS
-    cmd = [sys.executable, '-m', 'asarina.pipeline.kinstep', '--step', str(k), '--nsub', str(nsub),
-           '-j', str(args.jobs), '-o', out] + args.kinstep_args.split()
-    for j in series[:k]:
-        cmd += ['--ref', j['ecsv']]
-    cmd += [j['raw'] for j in series[:k]]
-    log.info(f"{os.path.basename(obs)}: step {k} ({k} series, bins of {nsub * k // POINTS})")
+    if series[0].get('kind') == 'frame':
+        use = series[:k * POINTS]
+        cmd = [sys.executable, '-m', 'asarina.pipeline.framestep', '--step', str(k),
+               '-j', str(args.jobs), '-o', out] + [f"{j['fits']}:{j['ecsv']}" for j in use]
+        cams = '+'.join(sorted(set(str(j['ccd']) for j in use)))
+        log.info(f"{os.path.basename(obs)}: step {k} ({len(use)} frames {cams}, bins of {k})")
+    else:
+        nsub = min(j['kinnum'] for j in series[:k]) // POINTS * POINTS
+        cmd = [sys.executable, '-m', 'asarina.pipeline.kinstep', '--step', str(k), '--nsub', str(nsub),
+               '-j', str(args.jobs), '-o', out] + args.kinstep_args.split()
+        for j in series[:k]:
+            cmd += ['--ref', j['ecsv']]
+        cmd += [j['raw'] for j in series[:k]]
+        log.info(f"{os.path.basename(obs)}: step {k} ({k} series, bins of {nsub * k // POINTS})")
     t = time.time()
     with open(os.path.join(out, 'kinstep.log'), 'w') as lf:
         try:
@@ -186,7 +230,7 @@ def run_step(obs, series, k, args):
 def flare_search(out):
     """pyrt-transients --flare-rec on the bins, in the background; it leaves flares.txt
     (the FLARES section of its output) when done."""
-    bins = sorted(glob.glob(os.path.join(out, '*-k[0-9]*b*.ecsv')))
+    bins = sorted(glob.glob(os.path.join(out, '*-[kf][0-9]*b*.ecsv')))
     if not bins:
         return
     script = ('pyrt-transients --flare-rec rec.ecsv "$@" > transients.log 2>&1; '
@@ -222,6 +266,10 @@ def serve(root, args):
     now = time.time()
     for obs in sorted(glob.glob(os.path.join(root, 'obs', '*'))):
         if now - os.path.getmtime(os.path.join(obs, 'series')) > OBS_ACTIVE:
+            # over: the copies of the calibrated frames go (4 MB each, ~150 per trigger)
+            if os.path.isdir(os.path.join(obs, 'frames')):
+                shutil.rmtree(os.path.join(obs, 'frames'), ignore_errors=True)
+                log.info(f"{os.path.basename(obs)}: over, calibrated frames removed")
             continue
         spath = os.path.join(obs, 'state.json')
         state = _load(spath, {'done': [], 'failed': []})
@@ -229,7 +277,7 @@ def serve(root, args):
             _save(spath, state)
         series = sorted((_load(p, None) for p in glob.glob(os.path.join(obs, 'series', '*.json'))),
                         key=lambda j: j['ctime'])
-        k = due_step(len(series), state)
+        k = due_step(len(series), state, series[0].get('kind', 'kinetic') if series else 'kinetic')
         if k is None:
             continue
         waiting = [j['stem'] for j in series[:k] if not raw_ready(j)]

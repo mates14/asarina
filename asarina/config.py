@@ -46,6 +46,9 @@ Recognised keys (underscores or dashes interchangeable):
                                   RS term exceeds this in absolute value
   kinseries_dir     str           real time: queue kinetic series (KINNUM >= 12) here for
                                   the progressive light curve (asarina-kinseries)
+  kinseries_frames  bool   false  also queue short frames of trigger targets (SBT C1+C2,
+                                  framestep: 12 bins of k frames after 12k frames)
+  kinseries_max_exptime float 15  the longest such frame
   skymap_dir        str           add good frames to the sky map tiles here (asarina-skymap)
   skymap_profile    str    sbt    its tiling, bands and frame gates: sbt or makak
   stat_dir          str
@@ -91,12 +94,12 @@ USER_CONFIG_FILE   = '~/.config/asarina/config'
 # string and therefore true.  Add new typed options here as they appear.
 _BOOL_KEYS  = frozenset({'sbt_window_patch', 'makak', 'refit_zpn', 'zpn_from_camera',
                          'phdb_by_night', 'no_raw_update', 'wcs_guess_keep',
-                         'phcat_noiraf'})
+                         'phcat_noiraf', 'kinseries_frames'})
 _INT_KEYS   = frozenset({'sip', 'passes', 'dophot_idlimit', 'dophot_max_stars', 'dophot_workers',
                          'db_min_idnum', 'phcat_back_size', 'min_idnum'})
 _FLOAT_KEYS = frozenset({'pixel_scale', 'phcat_fwhm', 'phcat_aperture', 'dophot_maglim', 'dophot_enlarge',
                           'gain', 'readnoise', 'ape', 'default_fwhm', 'zp_r', 'db_max_fwhm',
-                          'phqual_rs_max'})
+                          'phqual_rs_max', 'kinseries_max_exptime'})
 
 
 def _norm(key: str) -> str:
