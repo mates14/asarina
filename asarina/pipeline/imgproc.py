@@ -16,6 +16,7 @@ Sequence:
   6. dophot photometry pass
   7. save ECSV/PNG results
   8. upload ECSV to database server
+  8.9 kinetic series: queue for asarina-kinseries (real-time only, kinseries_dir)
   9. notify transient daemon (real-time only)
   10. locate archived raw by night/camera/filename, update its header
 """
@@ -480,6 +481,8 @@ def main():
     output.add_argument('--skymap-profile', default='sbt',
                         help='Sky map tiling, bands and frame gates: sbt or makak (default: %(default)s)')
     output.add_argument('--png-root', default='/home/mates/png')
+    output.add_argument('--kinseries-dir', metavar='DIR',
+                        help='real time: queue kinetic series here for asarina-kinseries')
     output.add_argument('--daily-summary', metavar='DIR', dest='daily_summary_dir',
                         help='Directory for nightly summary .dat files')
     output.add_argument('--stat-dir', metavar='DIR', dest='stat_dir',
@@ -791,6 +794,18 @@ def main():
                 logger.info(f"skymap: {res} ({time.time() - t_map:.1f}s)")
             except Exception as e:
                 logger.exception(f"skymap: {e}")
+
+        # 8.9. Kinetic series: queue it for the progressive light curve (kinseries.py),
+        # which runs detached as this user.  Real-time only, as the transient search,
+        # and before it: that call may block for up to two minutes.
+        if ecsv_path is not None and args.realtime and args.kinseries_dir:
+            try:
+                from asarina.pipeline.kinseries import queue_job
+                job = queue_job(args.kinseries_dir, raw_header, raw_path, ecsv_path)
+                if job:
+                    logger.info(f"Kinetic series queued: {job}")
+            except Exception as e:
+                logger.warning(f"kinseries: {e}")
 
         # 9. Notify transient daemon (as mates, so fnovotny can read the files).
         # Real-time only: an offline batch would feed it the whole archive.

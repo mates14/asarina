@@ -44,6 +44,8 @@ Recognised keys (underscores or dashes interchangeable):
   min_idnum         int    20     reject frames with at most this many matched stars
   phqual_rs_max     float         PHQUAL=BADFIT (photometry kept) when the fitted
                                   RS term exceeds this in absolute value
+  kinseries_dir     str           real time: queue kinetic series (KINNUM >= 12) here for
+                                  the progressive light curve (asarina-kinseries)
   skymap_dir        str           add good frames to the sky map tiles here (asarina-skymap)
   skymap_profile    str    sbt    its tiling, bands and frame gates: sbt or makak
   stat_dir          str
