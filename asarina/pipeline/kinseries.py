@@ -69,12 +69,13 @@ def queue_job(root, hdr, raw_path, ecsv_path, calibrated=None, frames=False, max
     Returns the job path, or None when the frame is neither."""
     stem = os.path.basename(str(raw_path))[:18]
     job = {
-        'stem': stem, 'raw': str(raw_path), 'ecsv': str(ecsv_path),
+        'stem': stem, 'raw': os.path.abspath(str(raw_path)), 'ecsv': os.path.abspath(str(ecsv_path)),
         'obsid': int(hdr.get('OBSID') or 0), 'target': hdr.get('TARGET'),
         'object': str(hdr.get('OBJECT', '')), 'filter': str(hdr.get('FILTER', 'UNK')),
         'ctime': float(hdr.get('CTIME', 0)) + float(hdr.get('USEC', 0)) / 1e6,
         'exptime': float(hdr.get('EXPTIME', 0)), 'ccd': hdr.get('CCD_NAME'), 'queued': time.time(),
     }
+    root = os.path.abspath(root)
     spool = os.path.join(root, 'spool')
     acq = str(hdr.get('ACQMODE', '')).strip().lower()
     kinnum = int(hdr.get('KINNUM') or 0)
