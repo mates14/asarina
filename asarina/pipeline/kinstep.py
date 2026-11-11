@@ -458,6 +458,9 @@ def main():
                    'bin_seconds': round(nbin * expt1, 2), 'deep_objects': len(deep),
                    'deep_limit': float(deep.meta.get('MAGLIMIT', np.nan)),
                    'seconds': round(time.time() - t_all, 1)}, f)
+    # the deep image stays for the finding chart (trigreport); the runner keeps only the latest
+    if os.path.exists(f"{work}/deep.fits"):
+        shutil.copy(f"{work}/deep.fits", f"{outdir}/deep.fits")
     if not args.keep:
         shutil.rmtree(work, ignore_errors=True)
     return 0 if nok == len(bins) else 1

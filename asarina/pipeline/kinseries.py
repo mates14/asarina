@@ -261,6 +261,14 @@ def report_flares(obs, state):
                  + (f"{len(cand)} candidate(s)" if cand else "nothing"))
         for ln in cand[:5]:
             log.info(f"    {ln}")
+        # the human side: report, page on lascaux, Telegram (trigreport), detached
+        subprocess.Popen([sys.executable, '-m', 'asarina.pipeline.trigreport', 'update', obs],
+                         stdin=subprocess.DEVNULL, stdout=open(os.path.join(obs, 'trigreport.log'), 'a'),
+                         stderr=subprocess.STDOUT, start_new_session=True)
+        # the deep image of the older steps is not needed any more (the chart is the latest's)
+        for old in glob.glob(os.path.join(obs, 'step[0-9][0-9]', 'deep.fits')):
+            if not old.startswith(os.path.join(obs, f"step{max(state.get('done', [k])):02d}")):
+                os.remove(old)
         fa = os.path.join(obs, f"step{k:02d}", 'afterglow.txt')
         if os.path.exists(fa):
             with open(fa) as fh:
@@ -280,6 +288,8 @@ def serve(root, args):
     for obs in sorted(glob.glob(os.path.join(root, 'obs', '*'))):
         if now - os.path.getmtime(os.path.join(obs, 'series')) > OBS_ACTIVE:
             # over: the copies of the calibrated frames go (4 MB each, ~150 per trigger)
+            for f in glob.glob(os.path.join(obs, 'step[0-9][0-9]', 'deep.fits')):
+                os.remove(f)
             if os.path.isdir(os.path.join(obs, 'frames')):
                 shutil.rmtree(os.path.join(obs, 'frames'), ignore_errors=True)
                 log.info(f"{os.path.basename(obs)}: over, calibrated frames removed")
