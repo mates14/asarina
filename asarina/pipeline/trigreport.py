@@ -49,6 +49,8 @@ N_CAND = 5          # candidates in the record
 N_PLOT = 3          # of them in the light-curve plot
 MATCH = 1.5         # [arcsec] a candidate in a bin catalogue
 CHART = 4.0         # [arcmin] finding chart size
+NEAR_BOX = 3.0      # [error-box radii] or
+NEAR_ARCMIN = 0.5   # [arcmin] "near the trigger" for the order of the candidates
 
 
 # ---------------------------------------------------------------- reading
@@ -164,9 +166,14 @@ def build(obs):
                               dwarf=bool(r['DWARF']), dist_arcmin=_f(r['DIST'], 2), dist_box=_f(r['DIST_BOX'], 2),
                               score=_f(r['S'] + r['PRIOR'], 1),
                               extrap={'0': [_f(r['FLARE_NOW'], 2), None], '30': [_f(r['FLARE_NEXT'], 2), None]}))
-    # order: a flare (decaying) or an ordered afterglow first, then by score
-    rank = {'FLARE': 0, 'FADING': 1, 'RISING': 1, 'TURNING': 1, 'FLARE?': 2, 'NEW': 3, 'ERRATIC': 4}
-    cands.sort(key=lambda c: (rank.get(c['cls'], 5), -(c['score'] or 0)))
+    # order: near the trigger first (within NEAR_BOX error-box radii or NEAR_ARCMIN), then the clear
+    # classes (a decaying flare, an ordered afterglow), then the score; a flare far out in the
+    # field is not what the trigger was about
+    clear = ('FLARE', 'FADING', 'RISING', 'TURNING')
+    def near(c):
+        db, da = c.get('dist_box'), c.get('dist_arcmin')
+        return (db is None and da is None) or (db is not None and db <= NEAR_BOX) or (da is not None and da <= NEAR_ARCMIN)
+    cands.sort(key=lambda c: (not near(c), c['cls'] not in clear, -(c['score'] or 0)))
     cands = cands[:N_CAND]
     for c in cands:
         c['lightcurve'] = _lightcurve(bins_last, c['ra'], c['dec'], t0)

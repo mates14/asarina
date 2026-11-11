@@ -51,7 +51,7 @@ from asarina.pipeline.kinstep import (Resampler, copy_keys, mark_accumulated, ph
 log = logging.getLogger("framestep")
 
 POINTS = 12
-MARGIN = 8   # [px] around the union of the footprints
+MARGIN = 8   # [px] inside the common footprint
 RESAMPLE_MEM = 2.5e9   # [B] for the pixel maps being built at the same time
 
 
@@ -76,12 +76,14 @@ class Frame:
 
 
 def make_skel(frames, path):
-    """TAN grid: the first frame's linear orientation and scale, centred on and covering the
-    union of all footprints."""
+    """TAN grid: the first frame's linear orientation and scale, over the footprint common to
+    all frames (their intersection, MARGIN inside): every pixel is covered by every frame.
+    Over the union, the edge rows were covered by only some frames of a bin when the
+    pointing wandered, and faked variability there (GRB 230818A: 'flares' along an edge)."""
     w0 = WCS(fits.Header(frames[0].wcs))
     cd = w0.pixel_scale_matrix
     # footprints in the first frame's pixels -> bounding box
-    xs, ys = [], []
+    bx0, bx1, by0, by1 = -np.inf, np.inf, -np.inf, np.inf
     for f in frames:
         w = WCS(fits.Header(f.wcs))
         ny, nx = f.shape
@@ -89,10 +91,13 @@ def make_skel(frames, path):
         ey = np.r_[np.zeros(9), np.linspace(0, ny - 1, 9), np.full(9, ny - 1), np.linspace(ny - 1, 0, 9)]
         ra, dec = w.all_pix2world(ex, ey, 0)
         x, y = w0.all_world2pix(ra, dec, 0)
-        xs.append(x)
-        ys.append(y)
-    xs, ys = np.concatenate(xs), np.concatenate(ys)
-    x0, x1, y0, y1 = xs.min() - MARGIN, xs.max() + MARGIN, ys.min() - MARGIN, ys.max() + MARGIN
+        # the inner box of this footprint (slightly rotated frames: the inner two values)
+        sx, sy = np.sort(x[[0, 9, 18, 27]]), np.sort(y[[0, 9, 18, 27]])
+        bx0, bx1 = max(bx0, sx[1]), min(bx1, sx[2])
+        by0, by1 = max(by0, sy[1]), min(by1, sy[2])
+    x0, x1, y0, y1 = bx0 + MARGIN, bx1 - MARGIN, by0 + MARGIN, by1 - MARGIN
+    if x1 - x0 < 100 or y1 - y0 < 100:
+        raise SystemExit(f"the frames have (almost) no common footprint: {x1 - x0:.0f} x {y1 - y0:.0f} px")
     nx, ny = int(np.ceil(x1 - x0)), int(np.ceil(y1 - y0))
     ra_c, dec_c = w0.all_pix2world([(x0 + x1) / 2], [(y0 + y1) / 2], 0)
     h = fits.Header()
