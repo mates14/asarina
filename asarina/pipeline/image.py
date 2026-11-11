@@ -16,6 +16,8 @@ import scipy.stats as stats
 
 from pyrt.utils.chip_id import load_chip_id
 
+from asarina.pipeline.patch_window import compute_keywords, KNOWN_WINDOW_SIZES
+
 # Camera-specific crop regions applied after dark/flat correction.
 # FITS section [x1:x2, y1:y2] (1-indexed inclusive) → numpy [y1-1:y2, x1-1:x2]
 #   mi6166, mi6167 (ex C1, C2): FITS [30:4127, 11:4108]
@@ -472,6 +474,18 @@ class ImageProcessor:
 
                 # Crop calibration frames to match a windowed science frame
                 window = self._parse_ccdsec(header)
+                if window is None and data.shape != dark_data.shape:
+                    # RTS2 (SBT) windowed frames carry no CCDSEC/LTV: assume the
+                    # window is centred on the full readout, sized like the dark.
+                    naxis2, naxis1 = data.shape
+                    if naxis1 == naxis2 and naxis1 in KNOWN_WINDOW_SIZES:
+                        chip_h, chip_w = dark_data.shape
+                        kw = compute_keywords(naxis1, chip_w=chip_w, chip_h=chip_h, shift=0)
+                        for key, (val, comment) in kw.items():
+                            header[key] = (val, comment)
+                        window = self._parse_ccdsec(header)
+                        logger.info(f"{output_name}: no window keywords, assuming centred "
+                                    f"{naxis1}x{naxis1} window on {chip_w}x{chip_h} chip")
                 if window is not None:
                     logger.info(f"{output_name}: windowed frame, cropping calibrations to {header.get('CCDSEC', 'LTV-derived')}")
                     dark_data = dark_data[window]
