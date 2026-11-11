@@ -313,7 +313,7 @@ class ImageProcessor:
         """Return numpy slice for a windowed frame, or None for a full-frame image.
 
         Reads CCDSEC '[x1:x2,y1:y2]' (1-indexed, FITS column-first convention).
-        Falls back to LTV1/LTV2 + NAXIS when CCDSEC is absent.
+        Falls back to LTV1/LTV2 + NAXIS when CCDSEC is absent (either sign, see below).
         """
         import re
         ccdsec = header.get('CCDSEC')
@@ -333,8 +333,12 @@ class ImageProcessor:
         naxis2 = header.get('NAXIS2')
         if not naxis1 or not naxis2:
             return None
-        x1 = int(ltv1) + 1
-        y1 = int(ltv2) + 1
+        # IRAF/RTS2: physical = logical - LTV, i.e. LTV = -(window offset); RTS2 writes it so
+        # since rts2ng b76ad27 (cameras started with --detsize).  patch_window.py has always
+        # written the offset itself, positive - archived SBT frames carry that.  A window
+        # offset is never negative, so the sign tells the two apart.
+        x1 = int(round(abs(ltv1))) + 1
+        y1 = int(round(abs(ltv2))) + 1
         return np.s_[y1-1:y1-1+naxis2, x1-1:x1-1+naxis1]
 
     def _find_best_dark_in_memory(self, chip: str, rounded_temp: int, binx: int,
