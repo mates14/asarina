@@ -36,6 +36,7 @@ import logging
 import os
 import shutil
 import sys
+import threading
 import time
 
 import numpy as np
@@ -175,31 +176,39 @@ def main():
     shape = (skel['NAXIS2'], skel['NAXIS1'])
     zref = frames[0].zp
 
-    def resample(f):
+    # every frame resampled once and added to its bin and to the deep image, then dropped:
+    # memory 2 x (12 + 1) grids, not one per frame (12 s SBT frames are 4k x 4k)
+    acc = np.zeros((args.points + 1,) + shape, np.float32)
+    cnt = np.zeros((args.points + 1,) + shape, np.uint16)
+    lock = threading.Lock()
+
+    def add(i_f):
+        i, f = i_f
         rs = Resampler(f.wcs, f"{work}/skel.hdr")
         img = rs(f.data()) * 10 ** (0.4 * (zref - f.zp))
         ny, nx = f.shape
         cov = (rs.x >= 0) & (rs.x <= nx - 1) & (rs.y >= 0) & (rs.y <= ny - 1)
-        return img, cov
+        img[~cov] = 0
+        b = i // k
+        with lock:
+            acc[b] += img
+            cnt[b] += cov
+            acc[-1] += img
+            cnt[-1] += cov
 
     with cf.ThreadPoolExecutor(max_workers=args.jobs) as ex:
-        res = list(ex.map(resample, frames))
+        list(ex.map(add, enumerate(frames)))
     log.info(f"{n} frames resampled onto {shape[1]}x{shape[0]} in {time.time() - t:.1f}s "
              f"(zeropoints {min(f.zp for f in frames):.2f}..{max(f.zp for f in frames):.2f})")
 
-    def mean_of(items, scale):
-        acc = np.zeros(shape, np.float32)
-        cnt = np.zeros(shape, np.float32)
-        for img, cov in items:
-            acc += np.where(cov, img, 0)
-            cnt += cov
-        out = np.where(cnt > 0, acc / np.maximum(cnt, 1) * scale, 0).astype(np.float32)
-        return out, cnt
+    def mean_of(j, scale):
+        c = cnt[j]
+        return np.where(c > 0, acc[j] / np.maximum(c, 1) * scale, 0).astype(np.float32), c
 
     bins = []
     for b in range(args.points):
         fr = frames[b * k:(b + 1) * k]
-        img, _ = mean_of(res[b * k:(b + 1) * k], k)
+        img, _ = mean_of(b, k)
         ts = fr[0].t0
         name = (time.strftime('%Y%m%d%H%M%S', time.gmtime(ts)) + f"-{int((ts % 1) * 1000):03d}"
                 + f"-{fr[0].hdr.get('FILTER', 'UNK')}-f{b * k:03d}b{k}")
@@ -207,11 +216,11 @@ def main():
                                                                                    overwrite=True)
         bins.append(name)
 
-    deep, cnt = mean_of(res, n)
+    deep, cnt = mean_of(-1, n)
     hdr = bin_header(skel, frames, n, frames[0].hdr)
     hdr['KINSTEP'] = (k, 'frames per bin of this step')
     fits.PrimaryHDU(data=deep, header=hdr).writeto(f"{work}/deep.fits", overwrite=True)
-    del res
+    del acc
     log.info(f"{len(bins)} bins and the deep image in {time.time() - t:.1f}s "
              f"(coverage {int(cnt.max())} frames, {np.mean(cnt >= n / 2) * 100:.0f}% of the grid by half or more)")
 
