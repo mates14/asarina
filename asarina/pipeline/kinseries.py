@@ -229,12 +229,17 @@ def run_step(obs, series, k, args):
 
 
 def flare_search(out):
-    """pyrt-transients --flare-rec on the bins, in the background; it leaves flares.txt
-    (the FLARES section of its output) when done."""
+    """pyrt-transients on the bins, in the background: the flare search (--flare-rec) and the
+    afterglow assessment, its candidates also from the step's deep catalogue (--deep: a faint
+    afterglow is significant only there).  Leaves flares.txt and afterglow.txt (the FLARES and
+    AFTERGLOW sections of its output; afterglow.ecsv in full) when done."""
     bins = sorted(glob.glob(os.path.join(out, '*-[kf][0-9]*b*.ecsv')))
     if not bins:
         return
-    script = ('pyrt-transients --flare-rec rec.ecsv "$@" > transients.log 2>&1; '
+    deep = sorted(glob.glob(os.path.join(out, '*-deep*.ecsv')))
+    opt = ('--deep %s ' % os.path.basename(deep[0])) if deep else ''
+    script = ('pyrt-transients --flare-rec rec.ecsv ' + opt + '"$@" > transients.log 2>&1; '
+              'sed -n "/AFTERGLOW START/,/AFTERGLOW END/p" transients.log > afterglow.tmp; mv afterglow.tmp afterglow.txt; '
               'sed -n "/FLARES START/,/FLARES END/p" transients.log > flares.tmp; mv flares.tmp flares.txt')
     subprocess.Popen(['sh', '-c', script, 'flares'] + [os.path.basename(b) for b in bins],
                      cwd=out, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -256,6 +261,13 @@ def report_flares(obs, state):
                  + (f"{len(cand)} candidate(s)" if cand else "nothing"))
         for ln in cand[:5]:
             log.info(f"    {ln}")
+        fa = os.path.join(obs, f"step{k:02d}", 'afterglow.txt')
+        if os.path.exists(fa):
+            with open(fa) as fh:
+                ag = [ln.rstrip() for ln in fh if ln.strip() and 'AFTERGLOW' not in ln and 'no new' not in ln]
+            log.info(f"{os.path.basename(obs)}: step {k} afterglow: " + (f"{len(ag)} new source(s), best:" if ag else "nothing"))
+            for ln in ag[:3]:
+                log.info(f"    {ln}")
         rep.append(k)
         new = True
     return new
