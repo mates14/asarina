@@ -52,6 +52,7 @@ log = logging.getLogger("framestep")
 
 POINTS = 12
 MARGIN = 8   # [px] around the union of the footprints
+RESAMPLE_MEM = 2.5e9   # [B] for the pixel maps being built at the same time
 
 
 class Frame:
@@ -196,7 +197,11 @@ def main():
             acc[-1] += img
             cnt[-1] += cov
 
-    with cf.ThreadPoolExecutor(max_workers=args.jobs) as ex:
+    # a pixel map takes ~60 B/px while it is built: 1k frames in parallel, 4k ones (~1 GB
+    # each) two at a time
+    npix = max(f.shape[0] * f.shape[1] for f in frames)
+    workers = max(1, min(args.jobs, int(RESAMPLE_MEM // (60 * npix))))
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(add, enumerate(frames)))
     log.info(f"{n} frames resampled onto {shape[1]}x{shape[0]} in {time.time() - t:.1f}s "
              f"(zeropoints {min(f.zp for f in frames):.2f}..{max(f.zp for f in frames):.2f})")
