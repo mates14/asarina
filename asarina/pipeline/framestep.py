@@ -150,6 +150,8 @@ def main():
     ap.add_argument('-o', '--outdir', help='output directory (default ./<first stem>-fstep<k>)')
     ap.add_argument('-j', '--jobs', type=int, default=4, help='parallel bins (default 4)')
     ap.add_argument('-I', '--noiraf', action='store_true', help='phcat -I (SExtractor magnitudes, faster)')
+    ap.add_argument('-E', '--engine', choices=('numpy', 'iraf', 'auto'), default='numpy',
+                    help='phcat aperture photometry: numpy (IRAF phot reimplemented, fast; default) or IRAF')
     ap.add_argument('-k', '--keep', action='store_true', help='keep the work files')
     ap.add_argument('-v', '--verbose', action='store_true')
     args = ap.parse_args()
@@ -237,7 +239,7 @@ def main():
     # 4. deep photometry
     fterms = args.filter_terms if args.filter_terms is not None else config_filter_terms(frames[0].hdr)
     base_cmd = ['pyrt-dophot', '-m0.5', '-S0', f'-i{args.idlimit}', '--max-stars', '1000']
-    phcat_args = ['-I'] if args.noiraf else []
+    phcat_args = ['-I'] if args.noiraf else ['-E', args.engine]
     terms = merge_terms(fixed_terms(frames[0].response), fterms)
     t = time.time()
     tt = photometry('deep.fits', work, base_cmd + (['-U', terms] if terms else []), phcat_args, logf)

@@ -385,6 +385,8 @@ def main():
     ap.add_argument('-o', '--outdir', help='output directory (default ./<first stem>-step<k>)')
     ap.add_argument('-j', '--jobs', type=int, default=2, help='parallel bins (default 2)')
     ap.add_argument('-I', '--noiraf', action='store_true', help='phcat -I (SExtractor magnitudes, faster)')
+    ap.add_argument('-E', '--engine', choices=('numpy', 'iraf', 'auto'), default='numpy',
+                    help='phcat aperture photometry: numpy (IRAF phot reimplemented, fast; default) or IRAF')
     ap.add_argument('--montage', action='store_true',
                     help='reproject every bin with pyrt-mproject (slow) instead of the per-series map')
     ap.add_argument('-k', '--keep', action='store_true', help='keep the work files (FITS, catalogues, logs)')
@@ -484,7 +486,7 @@ def main():
     # 3. deep photometry: the response of the first series' solution, zeropoint free
     fterms = args.filter_terms if args.filter_terms is not None else config_filter_terms(series[0].hdr)
     base_cmd = ['pyrt-dophot', '-m0.5', '-S0', f'-i{args.idlimit}', '--max-stars', '1000']
-    phcat_args = ['-I'] if args.noiraf else []
+    phcat_args = ['-I'] if args.noiraf else ['-E', args.engine]
     terms = merge_terms(fixed_terms(series[0].response), fterms)
     t = time.time()
     tt = photometry('deep.fits', work, base_cmd + (['-U', terms] if terms else []), phcat_args, logf)
