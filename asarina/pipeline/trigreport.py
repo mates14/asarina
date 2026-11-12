@@ -54,6 +54,9 @@ MATCH = 1.5         # [arcsec] a candidate in a bin catalogue
 CHART = 4.0         # [arcmin] finding chart size
 NEAR_BOX = 3.0      # [error-box radii] or
 NEAR_ARCMIN = 0.5   # [arcmin] "near the trigger" for the order of the candidates
+WIDE_BOX_ARCMIN = 30.0   # [arcmin] error-box radius above which (Fermi GBM) only a source that
+                         # varied during our observation counts: a brightened but steady star is a
+                         # regular sight in a box of degrees, worth a mention, never an alert
 
 
 # ---------------------------------------------------------------- reading
@@ -176,11 +179,12 @@ def build(obs):
     def near(c):
         db, da = c.get('dist_box'), c.get('dist_arcmin')
         return (db is None and da is None) or (db is not None and db <= NEAR_BOX) or (da is not None and da <= NEAR_ARCMIN)
-    cands.sort(key=lambda c: (not near(c), c['cls'] not in clear, -(c['score'] or 0)))
+    wide = trig is not None and trig['errorbox'] * 60 > WIDE_BOX_ARCMIN
+    cands.sort(key=lambda c: (wide and not _variable(c), not near(c), c['cls'] not in clear, -(c['score'] or 0)))
     cands = cands[:N_CAND]
     for c in cands:
         c['lightcurve'] = _lightcurve(bins_last, c['ra'], c['dec'], t0)
-    best = cands[0] if cands else None
+    best = cands[0] if cands and not (wide and not _variable(cands[0])) else None
     status = 'nothing' if best is None else ('candidate' if best['cls'] in ('NEW', 'ERRATIC', 'SPIKE', 'FLARE?') else 'likely')
 
     rec = dict(name=name, site=site, target=meta.get('TARGET'), object=str(meta.get('OBJECT', '')),
@@ -189,6 +193,7 @@ def build(obs):
                              errorbox_arcmin=_f(trig['errorbox'] * 60, 2), type=trig.get('type'))
                         if trig is not None else None),
                step=step_info[-1]['step'], steps=step_info, status=status, best=best, candidates=cands,
+               wide=wide,
                limits=_limits(bins_last, t0))
     with open(os.path.join(out, 'report.json.tmp'), 'w') as f:
         json.dump(rec, f, indent=1)
@@ -331,6 +336,12 @@ def plot_chart(rec, stepdir, path):
     plt.close(fig)
 
 
+def _variable(c):
+    """the source varied during our observation: an ordered afterglow light curve or a FLARE (a
+    significant excess that decays; a FLARE? with a decay is a weak excess drifting)"""
+    return c['cls'] in ('FADING', 'RISING', 'TURNING', 'FLARE')
+
+
 def _alpha(c):
     """The decay index that counts: the recent half's when significant (2 sigma), else the whole curve's."""
     ar, er = c.get('alpha_recent'), c.get('alpha_recent_err')
@@ -383,9 +394,18 @@ def gcn_text(rec):
     best = rec['best']
     lines.append("")
     if best is None:
-        lines.append(f"We do not detect any new source within the error box, nor a brightening of any "
-                     f"catalogued star (a stellar flare) in {st['bins']} frames of {st['bin_seconds']:.0f} s "
+        lines.append(f"We do not detect any " + ("source varying during our observation within the error box"
+                                                  if rec.get('wide') else
+                                                  "new source within the error box, nor a brightening of any "
+                                                  "catalogued star (a stellar flare)")
+                     + f" in {st['bins']} frames of {st['bin_seconds']:.0f} s "
                      f"(limit {band} ~ {st['bin_limit']} each) from T0+{st['t_first']:.0f} s to T0+{st['t_last']:.0f} s.")
+        # a wide box: what is brighter than the catalogue but steady gets a mention, not a claim
+        for c in [c for c in rec['candidates'] if rec.get('wide') and c['kind'] == 'flare' and (c['excess'] or 0) >= 0.2
+                  and (c['excess'] or 0) >= 5 * (c['excess_err'] or np.inf)][:2]:
+            lines.append(f"The catalogued star at {_deg2hms(c['ra'], c['dec'])} (r = {c['catmag']:.2f}) is "
+                         f"{c['excess']:.2f} mag brighter than its catalogue magnitude but constant during our "
+                         f"observation; we do not consider it related.")
     elif best['kind'] == 'afterglow':
         lines.append(f"We detect a new source at {_deg2hms(best['ra'], best['dec'])} (J2000, +-0.5\"), "
                      + (f"{best['dist_arcmin']:.1f}' from the trigger position, " if best.get('dist_arcmin') else "")
@@ -517,6 +537,8 @@ def message(rec, previous):
     inbox = best.get('dist_box') is not None and best['dist_box'] <= 1
     if not (best['cls'] in ('FADING', 'RISING', 'TURNING', 'FLARE') or (best['cls'] == 'FLARE?' and inbox)):
         return None
+    if rec.get('wide') and not _variable(best):
+        return None   # a wide (GBM) box: only what varied while we watched
     k = _key(best)
     if k in seen and (seen[k] == best['cls'] or (seen[k], best['cls']) == ('FLARE', 'FLARE?')):
         return None   # nothing new (a flare whose decay fit weakened for a step is still the flare)
