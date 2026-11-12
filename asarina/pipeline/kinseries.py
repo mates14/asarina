@@ -316,10 +316,35 @@ def serve(root, args):
 
 # ---------------------------------------------------------------- main
 
+def physical_cores():
+    """Physical CPU cores (SMT siblings share the FPU, and the bins are floating point)"""
+    try:
+        cores = set()
+        phys = core = None
+        with open('/proc/cpuinfo') as f:
+            for line in f:
+                k, _, v = line.partition(':')
+                k = k.strip()
+                if k == 'physical id':
+                    phys = v.strip()
+                elif k == 'core id':
+                    core = v.strip()
+                elif not k and core is not None:
+                    cores.add((phys, core)); phys = core = None
+        if core is not None:
+            cores.add((phys, core))
+        if cores:
+            return len(cores)
+    except OSError:
+        pass
+    return max(1, (os.cpu_count() or 2) // 2)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--dir', required=True, help='runner directory (spool/, obs/, log, lock)')
-    ap.add_argument('-j', '--jobs', type=int, default=3, help='parallel bins in kinstep (default 3)')
+    ap.add_argument('-j', '--jobs', type=int, default=physical_cores(),
+                    help='parallel bins in kinstep/framestep (default: the physical cores, %(default)s here)')
     ap.add_argument('--idle', type=float, default=1800, help='exit after this many idle seconds (default 1800)')
     ap.add_argument('--timeout', type=float, default=900, help='kinstep timeout [s] (default 900)')
     ap.add_argument('--kinstep-args', default='', help="extra kinstep arguments (one string, e.g. '--dark D --flat F')")
