@@ -102,6 +102,34 @@ class Series:
         return np.asarray(self._get(i), dtype=np.float32)
 
 
+def _cd(wcs):
+    if 'CD1_1' in wcs:
+        return np.array([[wcs['CD1_1'], wcs.get('CD1_2', 0.0)], [wcs.get('CD2_1', 0.0), wcs['CD2_2']]], float)
+    pc = np.array([[wcs.get('PC1_1', 1.0), wcs.get('PC1_2', 0.0)], [wcs.get('PC2_1', 0.0), wcs.get('PC2_2', 1.0)]], float)
+    return np.diag([wcs.get('CDELT1', 1.0), wcs.get('CDELT2', 1.0)]) @ pc
+
+
+def consistent_wcs(series, tol=0.01):
+    """Drop the series whose astrometric solution (the realtime pipeline's) disagrees with the
+    others in scale or rotation by more than tol: mapped onto the common grid its stars would
+    smear and its bins measure nothing (53294, 2026-03-22: one series solved 10% off in scale).
+    The solution most of the series agree with wins, the earliest on a tie."""
+    if len(series) < 2:
+        return series
+    cds = [_cd(s.wcs) for s in series]
+    def close(a, b):
+        return np.linalg.norm(a - b) / np.linalg.norm(b) < tol
+    votes = [sum(close(a, b) for b in cds) for a in cds]
+    best = cds[int(np.argmax(votes))]
+    keep = [s for s, cd in zip(series, cds) if close(cd, best)]
+    for s, cd in zip(series, cds):
+        if not close(cd, best):
+            sc = np.sqrt(abs(np.linalg.det(cd)) / abs(np.linalg.det(best)))
+            log.warning(f"{s.stem}: astrometric solution of {s.ref} off by {100 * (sc - 1):+.1f}% in scale "
+                        f"(or rotated) from the other series, series left out of this step")
+    return keep
+
+
 def calibrate_sum(series, a, b, dark, flat, crop):
     acc = np.zeros(dark.shape, np.float32)
     for i in range(a, b):
@@ -337,6 +365,7 @@ def main():
     for s in series:
         if s.nfr < args.nsub:
             raise SystemExit(f"{s.stem}: only {s.nfr} sub-frames, --nsub {args.nsub}")
+    series = consistent_wcs(series)
     expt1 = series[0].cycle
     log.info(f"step {k}: {k} series x {per_series} bins of {nbin} sub-frames ({nbin * expt1:.1f} s)")
 
@@ -394,13 +423,14 @@ def main():
         # pyrt-combine adds the (uniformly weighted) series sums: k x nsub readouts;
         # checked on the sky level, as the normalisation is combine's business
         scale = np.nanmedian(d[0].data[d[0].data != 0]) / np.nanmedian(fits.getdata(f"{work}/{sums[0]}"))
-        if not np.isfinite(scale) or abs(scale / k - 1) > 0.1:
-            log.warning(f"deep.fits is {scale:.2f} x a series sum, expected {k}")
+        ns = len(series)
+        if not np.isfinite(scale) or abs(scale / ns - 1) > 0.1:
+            log.warning(f"deep.fits is {scale:.2f} x a series sum, expected {ns}")
             if not np.isfinite(scale):
-                scale = k
+                scale = ns
         mark_accumulated(d[0].header, int(round(scale * args.nsub)))
         d[0].data = np.nan_to_num(d[0].data, nan=0.0).astype(np.float32)
-    log.info(f"deep.fits {hd['NAXIS1']}x{hd['NAXIS2']} from {k} series in {time.time() - t:.1f}s")
+    log.info(f"deep.fits {hd['NAXIS1']}x{hd['NAXIS2']} from {len(series)} series in {time.time() - t:.1f}s")
 
     # 3. deep photometry: the response of the first series' solution, zeropoint free
     fterms = args.filter_terms if args.filter_terms is not None else config_filter_terms(series[0].hdr)
@@ -423,7 +453,7 @@ def main():
         t = time.time()
         for s in series:
             resamplers[s.stem] = Resampler(s.wcs, f"{work}/skel.hdr")
-        log.info(f"pixel maps of {k} series onto skel.hdr in {time.time() - t:.1f}s")
+        log.info(f"pixel maps of {len(series)} series onto skel.hdr in {time.time() - t:.1f}s")
 
     def do_bin(name):
         t = time.time()

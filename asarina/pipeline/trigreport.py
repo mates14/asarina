@@ -178,7 +178,7 @@ def build(obs):
     for c in cands:
         c['lightcurve'] = _lightcurve(bins_last, c['ra'], c['dec'], t0)
     best = cands[0] if cands else None
-    status = 'nothing' if best is None else ('candidate' if best['cls'] in ('NEW', 'ERRATIC', 'FLARE?') else 'likely')
+    status = 'nothing' if best is None else ('candidate' if best['cls'] in ('NEW', 'ERRATIC', 'SPIKE', 'FLARE?') else 'likely')
 
     rec = dict(name=name, site=site, target=meta.get('TARGET'), object=str(meta.get('OBJECT', '')),
                filter=str(meta.get('FILTER', '')), updated=datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S'),
@@ -262,7 +262,10 @@ def plot_chart(rec, stepdir, path):
         return
     x, y = w.all_world2pix([[ra, dec]], 0)[0]
     scale = np.sqrt(abs(np.linalg.det(w.pixel_scale_matrix))) * 3600   # arcsec/px
-    r = int(CHART * 60 / scale / 2)
+    size = CHART
+    if best is None and rec['trigger'] and rec['trigger']['errorbox_arcmin']:
+        size = max(CHART, 2.2 * rec['trigger']['errorbox_arcmin'])   # nothing found: the whole error box
+    r = int(size * 60 / scale / 2)
     ny, nx = img.shape
     x0, x1, y0, y1 = max(0, int(x) - r), min(nx, int(x) + r), max(0, int(y) - r), min(ny, int(y) + r)
     cut = img[y0:y1, x0:x1]
@@ -293,7 +296,7 @@ def plot_chart(rec, stepdir, path):
     ax.set_ylim(y0, y1)
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.set_title(f"{CHART:.0f}' around {ra:.5f} {dec:+.5f} (deep, step {rec['step']})", fontsize=9)
+    ax.set_title(f"{size:.0f}' around {ra:.5f} {dec:+.5f} (deep, step {rec['step']})", fontsize=9)
     fig.tight_layout()
     fig.savefig(path, dpi=90)
     plt.close(fig)
@@ -309,8 +312,9 @@ def _alpha(c):
 
 def _trend(c):
     if c['kind'] == 'flare':
+        tags = [t for t, on in (('red', c.get('red')), ('dwarf', c.get('dwarf'))) if on]
         return (f"excess {c['excess']:+.2f}±{c['excess_err']:.2f} mag over the catalogue "
-                f"{c['catmag']:.2f}, decay {c['z_decay']:.1f}σ")
+                f"{c['catmag']:.2f}, decay {c['z_decay']:.1f}σ" + (f", {'+'.join(tags)} star" if tags else ''))
     if c.get('alpha') is not None:
         a, e = c['alpha'], c['alpha_err']
         ar, er = c.get('alpha_recent'), c.get('alpha_recent_err')
@@ -342,7 +346,9 @@ def gcn_text(rec):
     best = rec['best']
     lines.append("")
     if best is None:
-        lines.append("We do not detect any new source within the error box.")
+        lines.append(f"We do not detect any new source within the error box, nor a brightening of any "
+                     f"catalogued star (a stellar flare) in {st['bins']} frames of {st['bin_seconds']:.0f} s "
+                     f"(limit r ~ {st['bin_limit']} each) from T0+{st['t_first']:.0f} s to T0+{st['t_last']:.0f} s.")
     elif best['kind'] == 'afterglow':
         lines.append(f"We detect a new source at {_deg2hms(best['ra'], best['dec'])} (J2000, +-0.5\"), "
                      + (f"{best['dist_arcmin']:.1f}' from the trigger position, " if best.get('dist_arcmin') else "")
@@ -454,8 +460,8 @@ def message(rec, previous):
     if best is None:
         return None
     k = _key(best)
-    if k in seen and seen[k] == best['cls']:
-        return None
+    if k in seen and (seen[k] == best['cls'] or (seen[k], best['cls']) == ('FLARE', 'FLARE?')):
+        return None   # nothing new (a flare whose decay fit weakened for a step is still the flare)
     what = 'changed to' if k in seen else 'new'
     tr = rec['trigger']
     st = rec['steps'][-1]
