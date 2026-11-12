@@ -236,9 +236,12 @@ class ImageProcessor:
                         if binx not in self.master_darks[chip][temp]:
                             self.master_darks[chip][temp][binx] = {}
                         
-                        # Only add if not already present (avoid overwriting)
-                        if expt not in self.master_darks[chip][temp][binx]:
-                            self.master_darks[chip][temp][binx][expt] = filepath
+                        # Keyed by exposure AND shape: a windowed (e.g. 200x200)
+                        # dark of the same exposure must not shadow the full-frame
+                        # one.  Only add if not already present (avoid overwriting)
+                        key = (expt, (header.get('NAXIS2'), header.get('NAXIS1')))
+                        if key not in self.master_darks[chip][temp][binx]:
+                            self.master_darks[chip][temp][binx][key] = filepath
                             num_darks += 1
                         
                     elif image_type == 'mflat':
@@ -344,32 +347,46 @@ class ImageProcessor:
         return np.s_[y1-1:y1-1+naxis2, x1-1:x1-1+naxis1]
 
     def _find_best_dark_in_memory(self, chip: str, rounded_temp: int, binx: int,
-                                   expt: float) -> Optional[str]:
-        """Search already-loaded darks for the best match (no I/O)."""
+                                   expt: float, shape=None) -> Optional[str]:
+        """Search already-loaded darks for the best match (no I/O).
+
+        With shape (ny, nx) given, a dark of exactly that shape is preferred;
+        otherwise the largest one (a full frame, cropped by the caller for a
+        windowed frame).  Darks of any other shape are never returned.
+        """
         if (chip not in self.master_darks or
                 rounded_temp not in self.master_darks[chip] or
                 binx not in self.master_darks[chip][rounded_temp]):
             return None
 
-        available_exposures = self.master_darks[chip][rounded_temp][binx]
+        available = self.master_darks[chip][rounded_temp][binx]
+        shapes = {sh for _, sh in available}
+        if shape is not None and tuple(shape) in shapes:
+            want = tuple(shape)
+        else:
+            want = max(shapes, key=lambda sh: (sh[0] or 0) * (sh[1] or 0))
 
         min_diff = float('inf')
-        best_exposure = None
-        for available_expt in available_exposures:
+        best_key = None
+        for key in available:
+            available_expt, sh = key
+            if sh != want:
+                continue
             diff = abs(expt - available_expt)
             if diff < min_diff:
                 min_diff = diff
-                best_exposure = available_expt
+                best_key = key
 
         if min_diff <= self.exposure_tolerance:
-            return available_exposures[best_exposure]
+            return available[best_key]
         return None
 
-    def find_best_dark(self, chip: str, temp: float, binx: int, expt: float) -> Optional[str]:
+    def find_best_dark(self, chip: str, temp: float, binx: int, expt: float,
+                       shape=None) -> Optional[str]:
         """Find the best matching dark frame, falling back to adjacent years if needed."""
         rounded_temp = self._round_temperature(temp)
 
-        result = self._find_best_dark_in_memory(chip, rounded_temp, binx, expt)
+        result = self._find_best_dark_in_memory(chip, rounded_temp, binx, expt, shape)
         if result is not None:
             return result
 
@@ -377,7 +394,7 @@ class ImageProcessor:
         for year in self._year_search_order():
             darks, _ = self._load_calibration_year(year)
             if darks > 0:
-                result = self._find_best_dark_in_memory(chip, rounded_temp, binx, expt)
+                result = self._find_best_dark_in_memory(chip, rounded_temp, binx, expt, shape)
                 if result is not None:
                     logger.info(f"Using dark from {year} as fallback "
                                 f"(not available for {self.observation_year})")
@@ -450,7 +467,7 @@ class ImageProcessor:
                     return None
 
                 # Find calibration frames
-                dark_path = self.find_best_dark(chip, temp, binx, expt)
+                dark_path = self.find_best_dark(chip, temp, binx, expt, shape=data.shape)
                 flat_path = self.find_flat(chip, fltr, binx)
 
                 if dark_path is None:
@@ -488,7 +505,8 @@ class ImageProcessor:
                                     f"{naxis1}x{naxis1} window on {chip_w}x{chip_h} chip")
                 if window is not None:
                     logger.info(f"{output_name}: windowed frame, cropping calibrations to {header.get('CCDSEC', 'LTV-derived')}")
-                    dark_data = dark_data[window]
+                    if dark_data.shape != data.shape:   # a window-sized dark needs no crop
+                        dark_data = dark_data[window]
                     flat_data = flat_data[window]
 
                 # Perform calibration
