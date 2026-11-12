@@ -340,18 +340,26 @@ def gcn_text(rec):
     tname = tr['name'] if tr else rec['object']
     st = rec['steps'][-1]
     tel = {'D50': 'the 0.5m telescope D50 at Ondrejov (Czech Republic)',
-           'SBT': 'the Small Binocular Telescope (SBT) at Ondrejov (Czech Republic)'}.get(rec['site'], rec['site'])
+           'SBT': 'the Small Binocular Telescope (SBT) at Ondrejov (Czech Republic)',
+           'FRAM-Auger': 'the FRAM telescope at the Pierre Auger Observatory (Argentina)',
+           'FRAM-ORM': 'the FRAM telescope at the Roque de los Muchachos Observatory (La Palma, Spain)'}.get(rec['site'], rec['site'])
+    filt = str(rec.get('filter', ''))
+    if filt in ('N', 'clear', ''):
+        how, band = 'unfiltered, calibrated to r', 'r'
+    else:
+        band = filt.replace('Johnson_', '').replace('Sloan_', '')
+        how = f'{band} filter'
     lines = [f"TITLE: {tname}: {rec['site']} optical observations", "",
              "[authors] report:", ""]
     lines.append(f"We observed the field of {tname} with {tel}, starting {st['t_first']:.0f} s after the trigger "
-                 f"(unfiltered, calibrated to r).  The sum of the frames to T0+{st['t_last']:.0f} s reaches "
-                 f"r ~ {st['deep_limit']}.")
+                 f"({how}).  The sum of the frames to T0+{st['t_last']:.0f} s reaches "
+                 f"{band} ~ {st['deep_limit']}.")
     best = rec['best']
     lines.append("")
     if best is None:
         lines.append(f"We do not detect any new source within the error box, nor a brightening of any "
                      f"catalogued star (a stellar flare) in {st['bins']} frames of {st['bin_seconds']:.0f} s "
-                     f"(limit r ~ {st['bin_limit']} each) from T0+{st['t_first']:.0f} s to T0+{st['t_last']:.0f} s.")
+                     f"(limit {band} ~ {st['bin_limit']} each) from T0+{st['t_first']:.0f} s to T0+{st['t_last']:.0f} s.")
     elif best['kind'] == 'afterglow':
         lines.append(f"We detect a new source at {_deg2hms(best['ra'], best['dec'])} (J2000, +-0.5\"), "
                      + (f"{best['dist_arcmin']:.1f}' from the trigger position, " if best.get('dist_arcmin') else "")
