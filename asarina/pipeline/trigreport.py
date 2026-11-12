@@ -214,23 +214,49 @@ def plot_lc(rec, stepdir, path):
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(8, 5))
     colours = ['#d62728', '#1f77b4', '#2ca02c']
-    for c, col in zip(rec['candidates'][:N_PLOT], colours):
+    # the magnitude range follows the best candidate (its points, its quiescence, its extrapolation);
+    # other candidates and the bins' limits are drawn only where they fall into it, so that faint
+    # candidates or deep limits do not squash the evolution of the best one
+    window, times = None, []
+    for i, (c, col) in enumerate(zip(rec['candidates'][:N_PLOT], colours)):
         lc = np.array([x for x in c['lightcurve'] if x[2] is not None and x[0] > 0], dtype=float)
         if len(lc) == 0:
             continue
-        ax.errorbar(lc[:, 0], lc[:, 1], yerr=lc[:, 2], fmt='o', ms=4, color=col, capsize=0,
-                    label=f"{c['cls']} {c['ra']:.5f} {c['dec']:+.5f}")
+        ex = []
         if c['kind'] == 'afterglow' and c['cls'] != 'NEW':
-            tl = lc[-1, 0]
-            ex = [(tl + 60 * int(k), v[0], v[1]) for k, v in c['extrap'].items() if v[0] is not None]
-            if ex:
-                ex = np.array(ex, dtype=float)
-                ax.errorbar(ex[:, 0], ex[:, 1], yerr=ex[:, 2], fmt='s', mfc='none', color=col, alpha=0.6,
-                            capsize=3)
+            ex = [(lc[-1, 0] + 60 * int(k), v[0], v[1]) for k, v in c['extrap'].items() if v[0] is not None]
+        quiet = c.get('catmag') if c['kind'] == 'flare' else None
+        label = f"{c['cls']} {c['ra']:.5f} {c['dec']:+.5f}"
+        if window is None:
+            ys = list(lc[:, 1] - lc[:, 2]) + list(lc[:, 1] + lc[:, 2]) + [e[1] for e in ex]
+            if quiet is not None:
+                ys.append(quiet)
+            lo, hi = min(ys), max(ys)
+            pad = max(0.1, 0.1 * (hi - lo), (0.4 - (hi - lo)) / 2)
+            window = (lo - pad, hi + pad)
+        elif not (window[0] <= np.median(lc[:, 1]) <= window[1]):
+            ax.plot([], [], 'o', ms=4, color=col, alpha=0.4,
+                    label=f"{label} (off scale, {np.median(lc[:, 1]):.1f})")
+            continue
+        ax.errorbar(lc[:, 0], lc[:, 1], yerr=lc[:, 2], fmt='o', ms=4, color=col, capsize=0, label=label)
+        times += list(lc[:, 0])
+        if quiet is not None:
+            ax.axhline(quiet, ls='--', lw=1, color=col, alpha=0.7, label=f"quiescence (catalogue) {quiet:.2f}")
+        if len(ex):
+            ex = np.array(ex, dtype=float)
+            times += list(ex[:, 0])
+            ax.errorbar(ex[:, 0], ex[:, 1], yerr=ex[:, 2], fmt='s', mfc='none', color=col, alpha=0.6,
+                        capsize=3)
     lim = np.array([x for x in rec['limits'] if x[0] > 0 and x[1] is not None], dtype=float)
+    if window is not None and len(lim):
+        lim = lim[lim[:, 1] <= window[1]]
     if len(lim):
         ax.plot(lim[:, 0], lim[:, 1], 'v', color='grey', ms=4, alpha=0.6, label='bin limit')
-    ax.set_xscale('log')
+        times += list(lim[:, 0])
+    if window is not None:
+        ax.set_ylim(window[0], window[1])
+    if times and max(times) > 10 * min(times):   # a log time axis only where it spans a decade
+        ax.set_xscale('log')
     ax.invert_yaxis()
     ax.set_xlabel('time since trigger [s]' if rec['trigger'] else 'time since the first frame [s]')
     ax.set_ylabel(f"magnitude ({rec['filter']}, calibrated to r)" if rec['filter'] in ('N', 'clear') else 'magnitude')
