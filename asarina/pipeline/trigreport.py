@@ -449,7 +449,8 @@ def publish(obs, notify_args=()):
         key = os.path.expanduser(SSH_KEY)
         e = 'ssh -o BatchMode=yes -o ConnectTimeout=10' + (f' -i {key} -o IdentitiesOnly=yes' if os.path.exists(key) else '')
         rel = REPORT_ROOT.replace('~/public_html/', '', 1).strip('/')
-        subprocess.run(['rsync', '-rlD', '--mkpath', '--chmod=Fa+r,Da+rx',   # no -t: arrival time counts for scan '-e', e, rep + '/',
+        # no -t: the files get their arrival time on lascaux, which the scan goes by
+        subprocess.run(['rsync', '-rlD', '--mkpath', '--chmod=Fa+r,Da+rx', '-e', e, rep + '/',
                         f'{REPORT_HOST}:{rel}/{name}/'], timeout=120, check=True)
     return f"{REPORT_URL}/{name}/"
 
