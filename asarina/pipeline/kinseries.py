@@ -53,6 +53,7 @@ TRIVIAL = (1, 2, 3, 4, 6, 12)
 POINTS = 12
 MAX_FRAME_STEP = 12   # frames: up to 12 x 12 frames (12 min of SBT 5 s frames)
 RAW_WAIT = 120        # [s] how long a series may wait for its raw frame to be archived
+REPORT_POLL = 5       # [s] while a step runs, look for the previous step's search results this often
 OBS_ACTIVE = 4 * 3600  # [s] observations untouched for longer are not looked at
 
 
@@ -189,9 +190,11 @@ def due_step(nseries, state, kind='kinetic'):
     return k
 
 
-def run_step(obs, series, k, args):
+def run_step(obs, series, k, args, state=None, spath=None):
     """kinstep on the first k series of the observation (framestep on its first 12k
-    frames); True if it produced bins."""
+    frames); True if it produced bins.  While it runs, the previous step's search results
+    are reported as soon as they appear (state, spath: the observation's state), so that
+    the first alert does not wait for the next step."""
     out = os.path.join(obs, f"step{k:02d}")
     if os.path.isdir(out):
         shutil.rmtree(out)
@@ -212,11 +215,24 @@ def run_step(obs, series, k, args):
         log.info(f"{os.path.basename(obs)}: step {k} ({k} series, bins of {nsub * k // POINTS})")
     t = time.time()
     with open(os.path.join(out, 'kinstep.log'), 'w') as lf:
-        try:
-            r = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, timeout=args.timeout, cwd=out)
-            rc = r.returncode
-        except subprocess.TimeoutExpired:
-            rc = 'timeout'
+        p = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=out)
+        while True:
+            try:
+                rc = p.wait(timeout=REPORT_POLL)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            if state is not None:
+                try:
+                    if report_flares(obs, state):
+                        _save(spath, state)
+                except Exception as e:
+                    log.warning(f"{os.path.basename(obs)}: report while step {k} runs: {e}")
+            if time.time() - t > args.timeout:
+                p.kill()
+                p.wait()
+                rc = 'timeout'
+                break
     res = _load(os.path.join(out, 'step.json'), {})
     if not res.get('bins_ok'):
         log.error(f"{os.path.basename(obs)}: step {k} failed (rc {rc}, {time.time() - t:.0f}s), "
@@ -266,8 +282,10 @@ def report_flares(obs, state):
                          stdin=subprocess.DEVNULL, stdout=open(os.path.join(obs, 'trigreport.log'), 'a'),
                          stderr=subprocess.STDOUT, start_new_session=True)
         # the deep image of the older steps is not needed any more (the chart is the latest's)
+        # (only those of earlier steps: a later one may be running right now, see run_step)
+        newest = max(state.get('done', [k]))
         for old in glob.glob(os.path.join(obs, 'step[0-9][0-9]', 'deep.fits')):
-            if not old.startswith(os.path.join(obs, f"step{max(state.get('done', [k])):02d}")):
+            if int(os.path.basename(os.path.dirname(old))[4:]) < newest:
                 os.remove(old)
         fa = os.path.join(obs, f"step{k:02d}", 'afterglow.txt')
         if os.path.exists(fa):
@@ -306,7 +324,7 @@ def serve(root, args):
         waiting = [j['stem'] for j in series[:k] if not raw_ready(j)]
         if waiting and now - max(j['queued'] for j in series[:k]) < RAW_WAIT:
             continue  # RTS2 still archiving the raw frame
-        ok = run_step(obs, series, k, args)
+        ok = run_step(obs, series, k, args, state, spath)
         state.setdefault('done' if ok else 'failed', []).append(k)
         _save(spath, state)
         did = True

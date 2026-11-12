@@ -596,6 +596,7 @@ def scan(root, dry_run=False, chat_key=TELEGRAM_CHAT):
     """On lascaux, from cron: notify for every page whose report.json changed since the last
     scan (the uploads from the telescopes cannot run anything here)."""
     root = os.path.expanduser(root)
+    os.makedirs(root, exist_ok=True)   # before the first trigger the uploads have not made it yet
     stamp = os.path.join(root, '.scan.stamp')
     last = os.path.getmtime(stamp) if os.path.exists(stamp) else 0.0
     now = time.time()
