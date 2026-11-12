@@ -217,7 +217,7 @@ def plot_lc(rec, stepdir, path):
             continue
         ax.errorbar(lc[:, 0], lc[:, 1], yerr=lc[:, 2], fmt='o', ms=4, color=col, capsize=0,
                     label=f"{c['cls']} {c['ra']:.5f} {c['dec']:+.5f}")
-        if c['kind'] == 'afterglow':
+        if c['kind'] == 'afterglow' and c['cls'] != 'NEW':
             tl = lc[-1, 0]
             ex = [(tl + 60 * int(k), v[0], v[1]) for k, v in c['extrap'].items() if v[0] is not None]
             if ex:
@@ -383,9 +383,10 @@ def page(rec):
     rows = []
     for i, c in enumerate(rec['candidates']):
         ex = ' '.join(f"+{k}': {v[0]:.2f}" + (f"±{v[1]:.2f}" if v[1] is not None else '')
-                      for k, v in c['extrap'].items() if v[0] is not None)
+                      for k, v in c['extrap'].items() if v[0] is not None) if c['cls'] != 'NEW' else 'steady'
+
         rows.append(f"<tr><td>{i + 1}</td><td>{e(c['cls'])}</td><td>{c['ra']:.5f} {c['dec']:+.5f}</td>"
-                    f"<td>{(c.get('mag_last') or c.get('mag_mean') or 0):.2f}</td><td>{e(_trend(c))}</td>"
+                    f"<td>{_mag(c):.2f}</td><td>{e(_trend(c))}</td>"
                     f"<td>{e(ex)}</td><td>{(str(c['dist_arcmin']) + chr(39)) if c.get('dist_arcmin') is not None else ''}</td>"
                     f"<td>{c['score']}</td></tr>")
     srows = ''.join(f"<tr><td>{s['step']}</td><td>{s['bins']}</td><td>{s['bin_seconds']}</td>"
@@ -448,6 +449,13 @@ def publish(obs, notify_args=()):
     return f"{REPORT_URL}/{name}/"
 
 
+def _mag(c):
+    """The magnitude to quote: the latest, but the mean of a steady (NEW) source."""
+    if c['cls'] == 'NEW':
+        return c.get('mag_mean') or c.get('mag_last') or 0.0
+    return c.get('mag_last') or c.get('mag_mean') or 0.0
+
+
 def _key(c):
     return f"{c['ra']:.4f} {c['dec']:+.4f}"
 
@@ -459,6 +467,12 @@ def message(rec, previous):
     seen = previous.get('seen', {})
     if best is None:
         return None
+    # a message wakes people up: only a light curve that says something (an ordered afterglow,
+    # a decaying flare) or a flare-star candidate inside the error box; a steady NEW, an ERRATIC
+    # or a one-bin SPIKE stay on the page
+    inbox = best.get('dist_box') is not None and best['dist_box'] <= 1
+    if not (best['cls'] in ('FADING', 'RISING', 'TURNING', 'FLARE') or (best['cls'] == 'FLARE?' and inbox)):
+        return None
     k = _key(best)
     if k in seen and (seen[k] == best['cls'] or (seen[k], best['cls']) == ('FLARE', 'FLARE?')):
         return None   # nothing new (a flare whose decay fit weakened for a step is still the flare)
@@ -467,9 +481,9 @@ def message(rec, previous):
     st = rec['steps'][-1]
     t = tr['name'] if tr else rec['object']
     ex = ''
-    if best['kind'] == 'afterglow' and best['extrap'].get('15', [None])[0] is not None:
+    if best['kind'] == 'afterglow' and best['cls'] != 'NEW' and best['extrap'].get('15', [None])[0] is not None:
         ex = f", expected {best['extrap']['15'][0]:.1f}±{best['extrap']['15'][1]:.1f} at +15 min"
-    mag = best.get('mag_last') or best.get('mag_mean')
+    mag = _mag(best)
     return (f"{rec['site']} {t}: {what} {best['cls']} at {best['ra']:.5f} {best['dec']:+.5f}, "
             f"{mag:.2f} mag ({_trend(best)}){ex}"
             + (f", {best['dist_arcmin']}' from the trigger" if best.get('dist_arcmin') is not None else '')
