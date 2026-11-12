@@ -116,27 +116,13 @@ def load_calibration(raw_path, header, expt):
     proc.load_calibration_frames([raw_path])
     chip = load_chip_id(header)
     binx = header.get('BINX', 1)
-    dark_path = proc.find_best_dark(chip, header['CCD_TEMP'], binx, expt)
-    flat_path = proc.find_flat(chip, header['FILTER'], binx)
     shape = (header['NAXIS2'], header['NAXIS1'])
-    if dark_path is not None and fits.getheader(dark_path).get('NAXIS1') != shape[1]:
-        # asarina keys darks by (chip, temp, bin, exptime) only, so a windowed
-        # dark of the same exposure can shadow the full-frame one: pick by shape
-        best = None
-        for f in proc.loaded_files:
-            try:
-                h = fits.getheader(f)
-            except Exception:
-                continue
-            if ('dark' not in str(h.get('IMAGETYP', '')).lower() or (h.get('NAXIS2'), h.get('NAXIS1')) != shape
-                    or h.get('BINX', 1) != binx or abs(h.get('CCD_TEMP', 99) - header['CCD_TEMP']) > 3):
-                continue
-            d = abs(h.get('EXPTIME', 1e9) - expt)
-            if best is None or d < best[0]:
-                best = (d, f)
-        log.warning(f"dark {dark_path} has a different shape; "
-                    f"{'using ' + best[1] if best else 'no full-frame dark found'}")
-        dark_path = best[1] if best else None
+    window = proc._parse_ccdsec(header)
+    origin = (window[0].start, window[1].start) if window is not None else None
+    # asarina picks by shape and window position: a full frame (cropped below) or a dark
+    # of exactly this window
+    dark_path = proc.find_best_dark(chip, header['CCD_TEMP'], binx, expt, shape=shape, origin=origin)
+    flat_path = proc.find_flat(chip, header['FILTER'], binx)
     if dark_path is None or flat_path is None:
         raise RuntimeError(f"No dark ({dark_path}) or flat ({flat_path}) for {raw_path}")
     log.info(f"dark: {dark_path}")
@@ -144,9 +130,10 @@ def load_calibration(raw_path, header, expt):
     dark = fits.getdata(dark_path).astype(np.float32)
     flat = fits.getdata(flat_path).astype(np.float32)
 
-    window = proc._parse_ccdsec(header)
     if window is not None:
-        dark, flat = dark[window], flat[window]
+        if dark.shape != shape:   # a window-sized dark needs no crop
+            dark = dark[window]
+        flat = flat[window]
     crop = None if window is not None else CAMERA_CROPS.get(chip)
     return dark, flat, crop
 
