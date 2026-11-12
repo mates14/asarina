@@ -368,10 +368,10 @@ def gcn_text(rec):
                      + f") is {best['excess']:.2f} mag brighter than quiescence"
                      + (f" and fading (decay at {best['z_decay']:.1f} sigma)" if (best.get('z_decay') or 0) >= 2 else "")
                      + "; a stellar flare is a possible counterpart of the trigger.")
-    lines += ["", "Photometry (T0 = trigger time):", "  T-T0[s]   mag    err"]
     if best is not None:
+        lines += ["", "Photometry (T0 = trigger time):", "  T-T0[s]   mag     err"]
         for t, m, e in best['lightcurve']:
-            lines.append(f"  {t:7.0f}  {m:6.2f}  {e if e is not None else float('nan'):.2f}")
+            lines.append(f"  {t:7.0f}  {m:6.2f}  {e if e is not None else float('nan'):.3f}")
     lines += ["", "[closing sentence]", ""]
     return "\n".join(lines)
 
