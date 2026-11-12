@@ -431,6 +431,17 @@ def main():
         mark_accumulated(d[0].header, int(round(scale * args.nsub)))
         d[0].data = np.nan_to_num(d[0].data, nan=0.0).astype(np.float32)
     log.info(f"deep.fits {hd['NAXIS1']}x{hd['NAXIS2']} from {len(series)} series in {time.time() - t:.1f}s")
+    # the bins go onto the deep image's own grid (forced photometry needs the same pixels):
+    # pyrt-combine may write skel.hdr bigger than the image it trims (53267: 1024 vs 1020)
+    sk = fits.Header.fromtextfile(f"{work}/skel.hdr") if os.path.exists(f"{work}/skel.hdr") else None
+    if sk is None or (sk['NAXIS1'], sk['NAXIS2']) != (hd['NAXIS1'], hd['NAXIS2']):
+        if sk is not None:
+            log.warning(f"skel.hdr {sk['NAXIS1']}x{sk['NAXIS2']} differs from deep.fits, using the deep grid")
+        from astropy.wcs import WCS
+        nh = WCS(hd).to_header(relax=True)
+        nh['NAXIS'] = 2
+        nh['NAXIS1'], nh['NAXIS2'] = hd['NAXIS1'], hd['NAXIS2']
+        nh.totextfile(f"{work}/skel.hdr", overwrite=True)
 
     # 3. deep photometry: the response of the first series' solution, zeropoint free
     fterms = args.filter_terms if args.filter_terms is not None else config_filter_terms(series[0].hdr)
