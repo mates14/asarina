@@ -130,6 +130,50 @@ def consistent_wcs(series, tol=0.01):
     return keep
 
 
+CROP_MARGIN = 8   # [px] inside the common footprint
+
+
+def crop_common(deep_path, series, skel_path):
+    """Crop deep_path to the pixels covered by every series (the inner box of each series'
+    footprint, CROP_MARGIN inside) and write skel_path with its grid; returns its header."""
+    from astropy.wcs import WCS
+    with fits.open(deep_path, mode='update') as d:
+        hd = d[0].header
+        wd = WCS(hd)
+        ny, nx = d[0].data.shape
+        x0, x1, y0, y1 = 0.0, nx - 1.0, 0.0, ny - 1.0
+        for s in series:
+            w = WCS(fits.Header(s.wcs))
+            sx, sy = s.hdr['NAXIS1'], s.hdr['NAXIS2']
+            ex = np.r_[np.linspace(0, sx - 1, 9), np.full(9, sx - 1), np.linspace(sx - 1, 0, 9), np.zeros(9)]
+            ey = np.r_[np.zeros(9), np.linspace(0, sy - 1, 9), np.full(9, sy - 1), np.linspace(sy - 1, 0, 9)]
+            ra, dec = w.all_pix2world(ex, ey, 0)
+            x, y = wd.all_world2pix(ra, dec, 0)
+            # inner box of this footprint from its corners (as framestep: any of the series may
+            # be turned by 180 deg after a meridian flip, slight rotations take the inner values)
+            cx, cy = np.sort(x[[0, 9, 18, 27]]), np.sort(y[[0, 9, 18, 27]])
+            x0, x1 = max(x0, cx[1]), min(x1, cx[2])
+            y0, y1 = max(y0, cy[1]), min(y1, cy[2])
+        ix0, iy0 = max(0, int(np.ceil(x0 + CROP_MARGIN))), max(0, int(np.ceil(y0 + CROP_MARGIN)))
+        ix1, iy1 = min(nx, int(np.floor(x1 - CROP_MARGIN)) + 1), min(ny, int(np.floor(y1 - CROP_MARGIN)) + 1)
+        if ix1 - ix0 < 100 or iy1 - iy0 < 100:
+            log.warning(f"common footprint {ix1 - ix0}x{iy1 - iy0} px only, deep.fits left uncropped")
+            ix0, iy0, ix1, iy1 = 0, 0, nx, ny
+        if (ix0, iy0, ix1, iy1) != (0, 0, nx, ny):
+            d[0].data = d[0].data[iy0:iy1, ix0:ix1]
+            hd['CRPIX1'] -= ix0
+            hd['CRPIX2'] -= iy0
+            log.info(f"deep.fits cropped to the common footprint of {len(series)} series: "
+                     f"[{ix0}:{ix1}, {iy0}:{iy1}] of {nx}x{ny}")
+        hd = d[0].header.copy()
+    hd['NAXIS1'], hd['NAXIS2'] = ix1 - ix0, iy1 - iy0
+    sk = WCS(hd).to_header(relax=True)
+    sk['NAXIS'] = 2
+    sk['NAXIS1'], sk['NAXIS2'] = hd['NAXIS1'], hd['NAXIS2']
+    sk.totextfile(skel_path, overwrite=True)
+    return hd
+
+
 def calibrate_sum(series, a, b, dark, flat, crop):
     acc = np.zeros(dark.shape, np.float32)
     for i in range(a, b):
@@ -431,17 +475,11 @@ def main():
         mark_accumulated(d[0].header, int(round(scale * args.nsub)))
         d[0].data = np.nan_to_num(d[0].data, nan=0.0).astype(np.float32)
     log.info(f"deep.fits {hd['NAXIS1']}x{hd['NAXIS2']} from {len(series)} series in {time.time() - t:.1f}s")
-    # the bins go onto the deep image's own grid (forced photometry needs the same pixels):
-    # pyrt-combine may write skel.hdr bigger than the image it trims (53267: 1024 vs 1020)
-    sk = fits.Header.fromtextfile(f"{work}/skel.hdr") if os.path.exists(f"{work}/skel.hdr") else None
-    if sk is None or (sk['NAXIS1'], sk['NAXIS2']) != (hd['NAXIS1'], hd['NAXIS2']):
-        if sk is not None:
-            log.warning(f"skel.hdr {sk['NAXIS1']}x{sk['NAXIS2']} differs from deep.fits, using the deep grid")
-        from astropy.wcs import WCS
-        nh = WCS(hd).to_header(relax=True)
-        nh['NAXIS'] = 2
-        nh['NAXIS1'], nh['NAXIS2'] = hd['NAXIS1'], hd['NAXIS2']
-        nh.totextfile(f"{work}/skel.hdr", overwrite=True)
+    # the common footprint: pyrt-combine grids the union of the series, but where a series
+    # does not reach (the telescope recentred between series) its bins are empty and the
+    # forced photometry fakes variability (EP 53267: a 'TURNING' source 53 px from the edge);
+    # deep.fits is cropped to what every series covers, and the bins go onto that grid
+    hd = crop_common(f"{work}/deep.fits", series, f"{work}/skel.hdr")
 
     # 3. deep photometry: the response of the first series' solution, zeropoint free
     fterms = args.filter_terms if args.filter_terms is not None else config_filter_terms(series[0].hdr)
