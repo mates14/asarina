@@ -15,7 +15,9 @@ and a Telegram message when something new turns up.
                             gcn.txt       a draft GCN circular (never sent)
                             index.html    all of it, reloading itself
   publish <obsdir>        report/ -> lascaux:~/public_html/trigger/<site>-<target>/ (a local copy
-                          on lascaux, rsync over ssh elsewhere), then notify there
+                          and notify on lascaux; elsewhere rsync with the upload key ~/.ssh/l50,
+                          restricted on lascaux to rrsync -wo ~/public_html/)
+  scan    <rootdir>       on lascaux, from cron: notify for the pages updated since the last scan
   notify  <pagedir>       on lascaux: a Telegram message (bot of ~/gcn/config.json) when the best
                           candidate is new or changed its class; --dry-run prints it
   update  <obsdir>        build + publish (what the kinseries runner calls after a step)
@@ -43,6 +45,7 @@ SITE_DIR = {'D50': 'd50', 'SBT': 'sbt', 'FRAM-ORM': 'orm', 'FRAM-Auger': 'll'}
 REPORT_HOST = os.environ.get('TRIGREPORT_HOST', 'lascaux.asu.cas.cz')
 REPORT_ROOT = os.environ.get('TRIGREPORT_ROOT', '~/public_html/trigger')
 REPORT_URL = os.environ.get('TRIGREPORT_URL', 'https://lascaux.asu.cas.cz/m/trigger')
+SSH_KEY = os.environ.get('TRIGREPORT_SSH_KEY', '~/.ssh/l50')   # upload key (rrsync-restricted on lascaux)
 TELEGRAM_CONFIG = os.environ.get('TRIGREPORT_TELEGRAM_CONFIG', '~/gcn/config.json')
 TELEGRAM_CHAT = os.environ.get('TRIGREPORT_TELEGRAM_CHAT', 'private_chat_id')   # key in config.json 'telegram'
 N_CAND = 5          # candidates in the record
@@ -440,12 +443,14 @@ def publish(obs, notify_args=()):
         cmd = [sys.executable, '-m', 'asarina.pipeline.trigreport', 'notify', dest] + list(notify_args)
         subprocess.run(cmd, timeout=60)
     else:
-        ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', REPORT_HOST]
-        subprocess.run(ssh + [f'mkdir -p {REPORT_ROOT}/{name}'], timeout=30, check=True)
-        subprocess.run(['rsync', '-a', '-e', 'ssh -o BatchMode=yes -o ConnectTimeout=10', rep + '/',
-                        f'{REPORT_HOST}:{REPORT_ROOT}/{name}/'], timeout=120, check=True)
-        subprocess.run(ssh + [f'python3 -m asarina.pipeline.trigreport notify {REPORT_ROOT}/{name} '
-                              + ' '.join(notify_args)], timeout=90)
+        # the upload key is restricted on lascaux to rrsync -wo ~/public_html/ (write only, no
+        # shell): paths are relative to public_html, and the notification is lascaux's own
+        # business (trigreport scan, from cron, picks up the new report.json)
+        key = os.path.expanduser(SSH_KEY)
+        e = 'ssh -o BatchMode=yes -o ConnectTimeout=10' + (f' -i {key} -o IdentitiesOnly=yes' if os.path.exists(key) else '')
+        rel = REPORT_ROOT.replace('~/public_html/', '', 1).strip('/')
+        subprocess.run(['rsync', '-a', '--mkpath', '--chmod=Fa+r,Da+rx', '-e', e, rep + '/',
+                        f'{REPORT_HOST}:{rel}/{name}/'], timeout=120, check=True)
     return f"{REPORT_URL}/{name}/"
 
 
@@ -526,9 +531,28 @@ def notify(pagedir, dry_run=False, chat_key=TELEGRAM_CHAT):
     return text
 
 
+def scan(root, dry_run=False, chat_key=TELEGRAM_CHAT):
+    """On lascaux, from cron: notify for every page whose report.json changed since the last
+    scan (the uploads from the telescopes cannot run anything here)."""
+    root = os.path.expanduser(root)
+    stamp = os.path.join(root, '.scan.stamp')
+    last = os.path.getmtime(stamp) if os.path.exists(stamp) else 0.0
+    now = time.time()
+    for rj in sorted(glob.glob(os.path.join(root, '*', 'report.json'))):
+        if os.path.getmtime(rj) > last:
+            try:
+                notify(os.path.dirname(rj), dry_run, chat_key)
+            except Exception as e:
+                print(f"trigreport: {rj}: {e}", file=sys.stderr)
+    if not dry_run:
+        with open(stamp, 'w'):
+            pass
+        os.utime(stamp, (now, now))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('action', choices=('build', 'publish', 'notify', 'update'))
+    ap.add_argument('action', choices=('build', 'publish', 'notify', 'update', 'scan'))
     ap.add_argument('dir')
     ap.add_argument('--dry-run', action='store_true', help='notify: print the message instead of sending it')
     ap.add_argument('--chat', default=TELEGRAM_CHAT, help=f"key of the chat in {TELEGRAM_CONFIG} 'telegram' (default {TELEGRAM_CHAT})")
@@ -540,6 +564,8 @@ def main():
         print(publish(os.path.abspath(a.dir), nargs))
     elif a.action == 'notify':
         notify(a.dir, a.dry_run, a.chat)
+    elif a.action == 'scan':
+        scan(a.dir, a.dry_run, a.chat)
     else:
         if build(os.path.abspath(a.dir)):
             print(publish(os.path.abspath(a.dir), nargs))
