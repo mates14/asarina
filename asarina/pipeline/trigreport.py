@@ -150,7 +150,9 @@ def build(obs):
     cands = []
     agf = os.path.join(last, 'afterglow.ecsv')
     if os.path.exists(agf):
-        for r in Table.read(agf, format='ascii.ecsv')[:N_CAND]:
+        # all of them: the cut comes after the ordering below (near the trigger first), a candidate
+        # next to the trigger may rank low by its score (230818A at SBT: 11th behind catalogue gaps)
+        for r in Table.read(agf, format='ascii.ecsv'):
             cands.append(dict(kind='afterglow', cls=str(r['CLASS']), ra=_f(r['RA'], 6), dec=_f(r['DEC'], 6),
                               mag_mean=_f(r['MAG_MEAN']), mag_last=_f(r['MAG_LAST']), z_var=_f(r['Z_VAR'], 1),
                               cont=_f(r['CONT'], 2), alpha=_f(r['ALPHA']), alpha_err=_f(r['ALPHA_ERR']),
