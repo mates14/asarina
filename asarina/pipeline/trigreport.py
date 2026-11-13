@@ -50,7 +50,7 @@ TELEGRAM_CONFIG = os.environ.get('TRIGREPORT_TELEGRAM_CONFIG', '~/gcn/config.jso
 TELEGRAM_CHAT = os.environ.get('TRIGREPORT_TELEGRAM_CHAT', 'private_chat_id')   # key in config.json 'telegram'
 ERRATIC_ZVAR = 10.0     # an ERRATIC source inside the box this significant and
 ERRATIC_MARGIN = 2.0    # [mag] this far above the limit is 'likely'
-SCHEMA = 2          # report.json layout (2: fit, error parts, points, conditions, ids)
+SCHEMA = 3          # report.json layout (2: fit, error parts, points, conditions, ids; 3: fit chi2_ndf, moon_illum/alt, repeatability floor)
 N_CAND = 5          # candidates in the record
 N_PLOT = 3          # of them in the light-curve plot
 MATCH = 1.5         # [arcsec] a candidate in a bin catalogue
@@ -134,7 +134,8 @@ def _points(bins_tables, ra, dec, t0, frames):
 
 def _conditions(bins_tables):
     """Median of the bins: FWHM [arcsec], airmass, zeropoint, sky [mag/arcsec^2] (MAGZERO - 2.5 log
-    MEDIAN/pixel^2, the bin's level as the zeropoint's counts), moon distance [deg] and phase."""
+    MEDIAN/pixel^2, the bin's level as the zeropoint's counts), moon distance [deg], phase (RTS2 MOONPHA:
+    the phase angle / 1.8, 0 full, 100 new), illuminated fraction and altitude [deg]."""
     def med(f):
         v = [f(t.meta) for t in bins_tables]
         v = [x for x in v if x is not None and np.isfinite(x)]
@@ -149,7 +150,9 @@ def _conditions(bins_tables):
                 magzero=_f(med(lambda m: m.get('MAGZERO', np.nan)), 2),
                 sky_mag_arcsec2=_f(med(sky), 2),
                 moon_dist_deg=_f(med(lambda m: m.get('MOONDIST', np.nan)), 1),
-                moon_phase=_f(med(lambda m: m.get('MOONPHA', np.nan)), 1))
+                moon_phase=_f(med(lambda m: m.get('MOONPHA', np.nan)), 1),
+                moon_illum=_f(med(lambda m: (1 + np.cos(np.radians(1.8 * m.get('MOONPHA', np.nan)))) / 2), 3),
+                moon_alt_deg=_f(med(lambda m: m.get('MOONALT', np.nan)), 1))
 
 
 def _frames(stepdir):
@@ -172,7 +175,9 @@ def _fit(r, t0):
     for k, a, ae in (('whole', 'ALPHA', 'ALPHA_ERR'), ('recent', 'ALPHA_RECENT', 'ALPHA_RECENT_ERR')):
         K = k.upper()
         out[k] = dict(alpha=_f(r[a], 4), mag=_f(r[K + '_M'], 4),
-                      cov=[[_f(r[K + '_CAA'], 6), _f(r[K + '_CAM'], 6)], [_f(r[K + '_CAM'], 6), _f(r[K + '_CMM'], 6)]])
+                      cov=[[_f(r[K + '_CAA'], 6), _f(r[K + '_CAM'], 6)], [_f(r[K + '_CAM'], 6), _f(r[K + '_CMM'], 6)]],
+                      chi2_ndf=_f(r[K + '_CHI2']) if K + '_CHI2' in r.colnames else None,
+                      ndf=int(r[K + '_NDF']) if K + '_NDF' in r.colnames else None)
     return out
 
 
@@ -298,7 +303,17 @@ def build(obs):
                                            rate='mag/h, linear fit', margin='median bin limit - mean mag',
                                            cont='normalised light-curve length, 1 = noise, < 0.6 ordered',
                                            extrap='+dt min after the last point: [mag, total error]',
-                                           excess='flare: catalogue mag - measured, positive = brighter'),
+                                           excess='flare: catalogue mag - measured, positive = brighter',
+                                           chi2='candidate: chi2/(n-1) about the weighted mean (the variability test, '
+                                                'not the power law: fit.whole/recent.chi2_ndf is that)',
+                                           chi2_ndf='fit: chi2/ndf of the power law; cov is scaled by it when > 1',
+                                           err='mag, photometric, already scaled by sqrt(WSSRNDF) of the calibration',
+                                           floor='mag, the frame\'s repeatability beyond err (field stars against their '
+                                                 'own median), add in quadrature; 0 = err covers it, null = not measured',
+                                           cm='mag, the frame\'s common mode, added to mag in the fit',
+                                           moon_phase='RTS2 MOONPHA: lunar phase angle / 1.8, 0 full, 100 new',
+                                           moon_illum='illuminated fraction, 0..1', moon_alt_deg='deg, < 0 below the horizon',
+                                           moon_dist_deg='deg from the field'),
                name=name, site=site, target=meta.get('TARGET'), object=str(meta.get('OBJECT', '')),
                filter=str(meta.get('FILTER', '')), updated=datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S'),
                trigger=(dict(name=trig['name'], t0=trig['t0'], ra=_f(trig['ra'], 5), dec=_f(trig['dec'], 5),
