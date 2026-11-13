@@ -16,7 +16,7 @@ Recognised keys (underscores or dashes interchangeable):
   pixel_scale       float
   phcat_fwhm        float         fixed detection FWHM in px instead of the estimate
                                   from the frame (lit clouds pass for 50 px stars)
-  phcat_back_size   int           SExtractor background mesh in px (pyrt: 256)
+  phcat_back_size   int           SExtractor background mesh in px (pyrt: 64)
   phcat_aperture    float         fixed aperture radius in px (pyrt: sqrt(FWHM^2+1.5^2))
   phcat_noiraf      bool   false  photometry by SExtractor (MAG_APER with phcat_aperture)
                                   instead of IRAF phot
