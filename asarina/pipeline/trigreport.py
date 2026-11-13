@@ -48,6 +48,8 @@ REPORT_URL = os.environ.get('TRIGREPORT_URL', 'https://lascaux.asu.cas.cz/m/trig
 SSH_KEY = os.environ.get('TRIGREPORT_SSH_KEY', '~/.ssh/l50')   # upload key (rrsync-restricted on lascaux)
 TELEGRAM_CONFIG = os.environ.get('TRIGREPORT_TELEGRAM_CONFIG', '~/gcn/config.json')
 TELEGRAM_CHAT = os.environ.get('TRIGREPORT_TELEGRAM_CHAT', 'private_chat_id')   # key in config.json 'telegram'
+ERRATIC_ZVAR = 10.0     # an ERRATIC source inside the box this significant and
+ERRATIC_MARGIN = 2.0    # [mag] this far above the limit is 'likely'
 SCHEMA = 2          # report.json layout (2: fit, error parts, points, conditions, ids)
 N_CAND = 5          # candidates in the record
 N_PLOT = 3          # of them in the light-curve plot
@@ -286,6 +288,11 @@ def build(obs):
         c['points'] = _points(bins_last, c['ra'], c['dec'], t0, frames)
     best = cands[0] if cands and not (wide and not _variable(cands[0])) else None
     status = 'nothing' if best is None else ('candidate' if best['cls'] in ('NEW', 'ERRATIC', 'SPIKE', 'FLARE?') else 'likely')
+    if best is not None and best['cls'] == 'ERRATIC' and (best.get('dist_box') or 99) <= 1 and \
+            (best.get('z_var') or 0) >= ERRATIC_ZVAR and (best.get('margin') or 0) >= ERRATIC_MARGIN:
+        # inside the box, uncatalogued, bright and strongly variable without order: an afterglow
+        # with flares (GRB 250702F at D50, 19 sigma, 3.7 mag above the limit), not noise
+        status = 'likely'
 
     rec = dict(schema=SCHEMA, units=dict(t='s since T0 (bin middle)', alpha='m = M + 2.5 alpha log10(t - T0), > 0 fading',
                                            rate='mag/h, linear fit', margin='median bin limit - mean mag',
