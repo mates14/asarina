@@ -48,6 +48,7 @@ REPORT_URL = os.environ.get('TRIGREPORT_URL', 'https://lascaux.asu.cas.cz/m/trig
 SSH_KEY = os.environ.get('TRIGREPORT_SSH_KEY', '~/.ssh/l50')   # upload key (rrsync-restricted on lascaux)
 TELEGRAM_CONFIG = os.environ.get('TRIGREPORT_TELEGRAM_CONFIG', '~/gcn/config.json')
 TELEGRAM_CHAT = os.environ.get('TRIGREPORT_TELEGRAM_CHAT', 'private_chat_id')   # key in config.json 'telegram'
+SCHEMA = 2          # report.json layout (2: fit, error parts, points, conditions, ids)
 N_CAND = 5          # candidates in the record
 N_PLOT = 3          # of them in the light-curve plot
 MATCH = 1.5         # [arcsec] a candidate in a bin catalogue
@@ -102,6 +103,90 @@ def _lightcurve(bins_tables, ra, dec, t0):
     return lc
 
 
+def _points(bins_tables, ra, dec, t0, frames):
+    """The light curve with everything per point: t - T0 [s] of the bin's middle, its half width [s],
+    the calibrated magnitude and its photometric error, the frame's systematic floor and common mode
+    (the afterglow fit uses mag + cm with sqrt(err^2 + floor^2)), the bin's limit and filter;
+    a bin without the object gives mag None (the limit is then an upper limit)."""
+    fjd = np.array([v[0] for v in frames.values()]) if frames else np.array([])
+    fv = list(frames.values())
+    out = []
+    for t in bins_tables:
+        half = t.meta.get('EXPTIME', 0) / 2
+        jd = t.meta['JD'] + half / 86400
+        pt = dict(t=round((jd - t0) * 86400, 1), half_width=round(half, 1), mag=None, err=None,
+                  floor=None, cm=None, limit=_f(t.meta.get('MAGLIMIT'), 2), filter=str(t.meta.get('FILTER', '')))
+        if len(fjd):
+            i = int(np.argmin(np.abs(fjd - jd)))
+            if abs(fjd[i] - jd) < 2 * half / 86400 + 1e-5:
+                pt['cm'], pt['floor'] = _f(fv[i][1]), _f(fv[i][2])
+        if len(t):
+            d = np.hypot((np.asarray(t['ALPHA_J2000']) - ra) * np.cos(np.radians(dec)),
+                         np.asarray(t['DELTA_J2000']) - dec) * 3600
+            i = int(np.argmin(d))
+            if d[i] < MATCH:
+                pt['mag'], pt['err'] = _f(t['MAG_CALIB'][i]), _f(t['MAGERR_CALIB'][i])
+        out.append(pt)
+    return out
+
+
+def _conditions(bins_tables):
+    """Median of the bins: FWHM [arcsec], airmass, zeropoint, sky [mag/arcsec^2] (MAGZERO - 2.5 log
+    MEDIAN/pixel^2, the bin's level as the zeropoint's counts), moon distance [deg] and phase."""
+    def med(f):
+        v = [f(t.meta) for t in bins_tables]
+        v = [x for x in v if x is not None and np.isfinite(x)]
+        return float(np.median(v)) if v else np.nan
+    def sky(m):
+        try:
+            return m['MAGZERO'] - 2.5 * np.log10(m['MEDIAN'] / m['PIXEL']**2)
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            return None
+    return dict(fwhm_arcsec=_f(med(lambda m: m.get('FWHM', np.nan) * m.get('PIXEL', np.nan)), 2),
+                airmass=_f(med(lambda m: m.get('AIRMASS', np.nan)), 2),
+                magzero=_f(med(lambda m: m.get('MAGZERO', np.nan)), 2),
+                sky_mag_arcsec2=_f(med(sky), 2),
+                moon_dist_deg=_f(med(lambda m: m.get('MOONDIST', np.nan)), 1),
+                moon_phase=_f(med(lambda m: m.get('MOONPHA', np.nan)), 1))
+
+
+def _frames(stepdir):
+    """The afterglow search's per-frame common mode and floor (pyrt.core.afterglow.frame_stats)."""
+    try:
+        from astropy.table import Table
+        from pyrt.core.afterglow import frame_stats
+        return frame_stats(Table.read(os.path.join(stepdir, 'rec.ecsv'), format='ascii.ecsv'))
+    except Exception:
+        return {}
+
+
+def _fit(r, t0):
+    """The afterglow candidate's power-law fits m = M + 2.5 alpha (x - x_ref), x = log10((t - T0)/min),
+    with the covariance of (alpha, M); 'used' says which one extrapolates (recent, whole, or mean for
+    a steady source)."""
+    if 'X_REF' not in r.colnames or not np.isfinite(r['X_REF']):
+        return None
+    out = dict(x_ref=_f(r['X_REF'], 4), t_ref_s=_f(60 * 10**r['X_REF'], 1), used=str(r['FIT_USED']))
+    for k, a, ae in (('whole', 'ALPHA', 'ALPHA_ERR'), ('recent', 'ALPHA_RECENT', 'ALPHA_RECENT_ERR')):
+        K = k.upper()
+        out[k] = dict(alpha=_f(r[a], 4), mag=_f(r[K + '_M'], 4),
+                      cov=[[_f(r[K + '_CAA'], 6), _f(r[K + '_CAM'], 6)], [_f(r[K + '_CAM'], 6), _f(r[K + '_CMM'], 6)]])
+    return out
+
+
+def _extrap_list(r, t_last_s):
+    out = []
+    for k in (5, 15, 60):
+        e = {p: _f(r['MAG_%d_E%s' % (k, p)]) if 'MAG_%d_E%s' % (k, p) in r.colnames else None
+             for p in ('STAT', 'DIFF', 'CURV', 'CAP', 'FLOOR')}
+        model = [v for p, v in e.items() if p != 'STAT' and v is not None]
+        out.append(dict(dt_min=k, t_since_t0_s=_f(t_last_s + 60 * k, 0) if t_last_s is not None else None,
+                        mag=_f(r['MAG_%d' % k]), err=_f(r['MAG_%d_ERR' % k]), err_stat=e['STAT'],
+                        err_model=_f(np.sqrt(np.sum(np.square(model)))) if model else None,
+                        err_parts=dict(diff=e['DIFF'], curv=e['CURV'], cap=e['CAP'], floor=e['FLOOR'])))
+    return out
+
+
 def _limits(bins_tables, t0):
     return [[round((t.meta['JD'] + t.meta.get('EXPTIME', 0) / 2 / 86400 - t0) * 86400, 1),
              round(float(t.meta.get('MAGLIMIT', np.nan)), 2)] for t in bins_tables]
@@ -144,7 +229,10 @@ def build(obs):
         step_info.append(dict(step=sj['step'], bins=sj.get('bins_ok'), bin_seconds=sj.get('bin_seconds'),
                               deep_limit=_f(sj.get('deep_limit'), 2), seconds=sj.get('seconds'),
                               t_first=_f(min(tt), 0), t_last=_f(max(tt) + bt[-1].meta.get('EXPTIME', 0), 0),
-                              bin_limit=_f(np.nanmedian([t.meta.get('MAGLIMIT', np.nan) for t in bt]), 2)))
+                              bin_limit=_f(np.nanmedian([t.meta.get('MAGLIMIT', np.nan) for t in bt]), 2),
+                              exposure_bin_s=_f(np.median([t.meta.get('EXPTIME', np.nan) for t in bt]), 2),
+                              exposure_total_s=_f(np.nansum([t.meta.get('EXPTIME', np.nan) for t in bt]), 1),
+                              **_conditions(bt)))
     bins_last = [Table.read(b, format='ascii.ecsv') for b in _bins(last)]
 
     cands = []
@@ -153,7 +241,12 @@ def build(obs):
         # all of them: the cut comes after the ordering below (near the trigger first), a candidate
         # next to the trigger may rank low by its score (230818A at SBT: 11th behind catalogue gaps)
         for r in Table.read(agf, format='ascii.ecsv'):
+            t_last_s = _f((r['T_LAST'] - t0) * 86400, 1)
             cands.append(dict(kind='afterglow', cls=str(r['CLASS']), ra=_f(r['RA'], 6), dec=_f(r['DEC'], 6),
+                              n=int(r['N']), chi2=_f(r['CHI2']), curv_z=_f(r['CURV_Z'], 2), rate_err=_f(r['RATE_ERR']),
+                              t_last_s=t_last_s, span_min=_f(r['SPAN'], 2), frac=_f(r['FRAC'], 2),
+                              n_cloudy=int(r['N_CLOUDY']) if 'N_CLOUDY' in r.colnames else None,
+                              fit=_fit(r, t0), extrap_list=_extrap_list(r, t_last_s),
                               mag_mean=_f(r['MAG_MEAN']), mag_last=_f(r['MAG_LAST']), z_var=_f(r['Z_VAR'], 1),
                               cont=_f(r['CONT'], 2), alpha=_f(r['ALPHA']), alpha_err=_f(r['ALPHA_ERR']),
                               alpha_recent=_f(r['ALPHA_RECENT']), alpha_recent_err=_f(r['ALPHA_RECENT_ERR']),
@@ -173,7 +266,9 @@ def build(obs):
                               z_decay=_f(r['Z_DECAY'], 1), tau_min=_f(r['TAU'], 0), red=bool(r['RED']),
                               dwarf=bool(r['DWARF']), dist_arcmin=_f(r['DIST'], 2), dist_box=_f(r['DIST_BOX'], 2),
                               score=_f(r['S'] + r['PRIOR'], 1),
-                              extrap={'0': [_f(r['FLARE_NOW'], 2), None], '30': [_f(r['FLARE_NEXT'], 2), None]}))
+                              trend=_f(r['TREND']), trend_err=_f(r['TREND_ERR']), excess_max=_f(r['EXCESS_MAX']),
+                              colx=_f(r['COLX']), colr=_f(r['COLR']), pm=_f(r['PM']),
+                              excess_extrap={'0': [_f(r['FLARE_NOW'], 2), None], '30': [_f(r['FLARE_NEXT'], 2), None]}))
     # order: near the trigger first (within NEAR_BOX error-box radii or NEAR_ARCMIN), then the clear
     # classes (a decaying flare, an ordered afterglow), then the score; a flare far out in the
     # field is not what the trigger was about
@@ -184,12 +279,20 @@ def build(obs):
     wide = trig is not None and trig['errorbox'] * 60 > WIDE_BOX_ARCMIN
     cands.sort(key=lambda c: (wide and not _variable(c), not near(c), c['cls'] not in clear, -(c['score'] or 0)))
     cands = cands[:N_CAND]
+    frames = _frames(last)
     for c in cands:
+        c['id'] = _key(c)     # rounded position: the same for the same source in every step and telescope
         c['lightcurve'] = _lightcurve(bins_last, c['ra'], c['dec'], t0)
+        c['points'] = _points(bins_last, c['ra'], c['dec'], t0, frames)
     best = cands[0] if cands and not (wide and not _variable(cands[0])) else None
     status = 'nothing' if best is None else ('candidate' if best['cls'] in ('NEW', 'ERRATIC', 'SPIKE', 'FLARE?') else 'likely')
 
-    rec = dict(name=name, site=site, target=meta.get('TARGET'), object=str(meta.get('OBJECT', '')),
+    rec = dict(schema=SCHEMA, units=dict(t='s since T0 (bin middle)', alpha='m = M + 2.5 alpha log10(t - T0), > 0 fading',
+                                           rate='mag/h, linear fit', margin='median bin limit - mean mag',
+                                           cont='normalised light-curve length, 1 = noise, < 0.6 ordered',
+                                           extrap='+dt min after the last point: [mag, total error]',
+                                           excess='flare: catalogue mag - measured, positive = brighter'),
+               name=name, site=site, target=meta.get('TARGET'), object=str(meta.get('OBJECT', '')),
                filter=str(meta.get('FILTER', '')), updated=datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S'),
                trigger=(dict(name=trig['name'], t0=trig['t0'], ra=_f(trig['ra'], 5), dec=_f(trig['dec'], 5),
                              errorbox_arcmin=_f(trig['errorbox'] * 60, 2), type=trig.get('type'))
@@ -442,7 +545,7 @@ def page(rec):
     rows = []
     for i, c in enumerate(rec['candidates']):
         ex = ' '.join(f"+{k}': {v[0]:.2f}" + (f"±{v[1]:.2f}" if v[1] is not None else '')
-                      for k, v in c['extrap'].items() if v[0] is not None) if c['cls'] != 'NEW' else 'steady'
+                      for k, v in c.get('extrap', c.get('excess_extrap', {})).items() if v[0] is not None) if c['cls'] != 'NEW' else 'steady'
 
         rows.append(f"<tr><td>{i + 1}</td><td>{e(c['cls'])}</td><td>{c['ra']:.5f} {c['dec']:+.5f}</td>"
                     f"<td>{_mag(c):.2f}</td><td>{e(_trend(c))}</td>"
