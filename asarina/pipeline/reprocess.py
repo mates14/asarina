@@ -73,7 +73,8 @@ SETUP_FILE = '~/.config/asarina/reprocess.ini'
 # Directories under a CCD directory that hold no science frames
 NON_SCIENCE = {'darks', 'flats', 'masterdarks', 'masterflats'}
 
-RECOVERABLE = {'nodark', 'noflat', 'catalog', 'dophot', 'crash', 'timeout', 'nooutput'}
+RECOVERABLE = {'nodark', 'noflat', 'catalog', 'dophot', 'crash', 'timeout', 'nooutput',
+               'toolerror'}
 IRRECOVERABLE = {'unreadable', 'saturated', 'nostars', 'nosolve', 'astqual', 'idnum'}
 
 SCHEMA = """

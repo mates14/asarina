@@ -64,6 +64,7 @@ EXIT_CODES = {
     'dophot':     33,
     'astqual':    34,
     'idnum':      35,
+    'toolerror':  40,
 }
 
 

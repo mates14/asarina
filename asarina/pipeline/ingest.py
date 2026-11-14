@@ -147,7 +147,8 @@ class PhotometryPipeline:
         # Why the last phase failed, None while all went well: 'nodark',
         # 'noflat', 'unreadable', 'notobject' (calibrate), 'saturated',
         # 'nostars', 'nosolve' (solve), 'catalog', 'dophot', 'astqual', 'idnum'
-        # (photometry).  asarina-imgproc exits with a code for each.
+        # (photometry), 'toolerror' (a pyrt tool refused its command line).
+        # asarina-imgproc exits with a code for each.
         self.failure = None
 
         self.image_processor = ImageProcessor(calib_root=calib_root,
@@ -360,6 +361,14 @@ class PhotometryPipeline:
             cwd=str(temp_dir), capture_output=True, text=True,
         )
         elapsed = time.time() - t
+        if ret.returncode == 2:
+            # argparse refused the command line: pyrt is older than this
+            # asarina expects (2026-11: -K before pyrt had it), not a bad frame
+            self.failure = 'toolerror'
+            logger.error("pyrt-field-solve rejected its command line "
+                         f"({' '.join(solve_cmd[:-1])}): update pyrt\n"
+                         f"stderr:\n{(ret.stderr or '').rstrip()}")
+            return False
         if ret.returncode != 0:
             out = (ret.stdout or '').rstrip()
             err = (ret.stderr or '').rstrip()
