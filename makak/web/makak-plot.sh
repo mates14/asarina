@@ -104,6 +104,8 @@ rm -f cloud$$.dat
 
 if [ -z "$NOUPLOAD" ]; then
 	rsync mr$night.png lascaux.asu.cas.cz:mrpng/
-	rsync mr$night.png lascaux.asu.cas.cz:makak.png
+	# lascaux's rrsync -wo refuses a renaming upload (src:dst-name: "could
+	# not make way for new regular file: 4"), so upload a copy by its name
+	mkdir -p up && cp mr$night.png up/makak.png && rsync up/makak.png lascaux.asu.cas.cz:./
 	rsync $file lascaux.asu.cas.cz:dat/
 fi
