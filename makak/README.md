@@ -39,6 +39,14 @@ directory: state, ECSVs, nightly summaries, the graph) and on zeus/hog. It produ
 - `bin/makak-distortion.py FRAME OUTDIR [dophot opts]`: one frame through the service
   pipeline, then a `pyrt-dophot -p` pass with your options. It writes `*-arrows.png`
   and residual plots for working on the distortion model.
+- `bin/makak-renight.sh run|status|swap NIGHT...`: whole nights again on morpheus,
+  in daytime only (from cron), with a fresh WCS guess, then swapped in for the
+  service's outputs. For nights processed on a wrong guess (2026-11-07 and 11-13).
+  Lascaux's rrsync refuses a renaming upload, so `makak.png` is uploaded as a copy
+  by that name (the main graph stayed at 2026-11-08 until 11-14).
+- `dev/cloud-match.py`, `dev/parameter_extractor.py`: analysis of the nightly
+  summaries from makak-reloaded (2025; zeropoint against cloudiness, polynomial fits of
+  the photometric parameters with Sun and Moon context).
 - `dev/`: `bench.sh`, `cloudbench.sh`, `sim.sh` (the tests below), `astcmp.py`,
   `cloudcmp.py`, `test.conf`. Their data (`testdata/`: 140 frames of 2026-10-24, every
   50th plus 80 consecutive from 22:00 UT; `bench/`, `sim/`) is not in the repo, only in
@@ -131,7 +139,12 @@ about 3 s per frame on morpheus (1.2 s on the laptop). It needs
 next to SBT's (pixelCut -20000 300000 asinh, asarina 74869b4; log in `hips.log`).
 Serving it is still to be done (SBT's is served by a Python httpd per request).
 
-The field covers Dec ~63-84 (not the zenith). Night 2026-10-26 was reprocessed
+The field (not the zenith) was centred at Dec +73.9 (~63-84) until 2026-11-05,
++81.5 on 11-06..08 and +76.7 since a move between 11-08 and 11-13 (from solved
+frames). After a move the WCS guess no longer fits and the first frame must be
+field-solved; with field-solve broken (asarina passing `-K` to an older pyrt,
+2026-11-05..14) the nights 11-07 and 11-13 kept a bad guess (~40 matched stars
+instead of ~300) and are redone by `bin/makak-renight.sh`. Night 2026-10-26 was reprocessed
 on zeus (2026-10-27, `bin/makak-rep-one.sh`, 20 frames in parallel, 3708 frames
 in 1.5 h) and
 `asarina-skymap merge`d into the map: 2994 frames with a zeropoint (2479 live),
