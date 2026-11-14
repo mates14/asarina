@@ -25,14 +25,44 @@ midnight=$(date -ud $now2 +%s)
 
 # twilights as seconds from the UT midnight
 eval $(rts2-state --UT -N -d $now2 2>/dev/null | awk -v d=86400 '/night/{print "tmnight="$1%d-d;} /dawn/{print "tmdawn="$1%d;} /morning/{print "tmmorning="$1%d;} /dusk/{print "tmdusk="$1%d-d;}')
+# no working rts2-state (zeus): the same from astropy, the Sun crossing
+# morpheus' rts2.ini day_horizon = 1 (dusk, morning) and night_horizon = -10
+if [ -z "${tmnight:-}" ]; then
+	eval $(python3 - $midnight <<'PY'
+import sys, numpy as np
+from astropy.utils import iers
+iers.conf.auto_download = False
+from astropy.time import Time
+from astropy.coordinates import EarthLocation, AltAz, get_sun
+import astropy.units as u
+m = int(sys.argv[1])
+t = m + np.arange(-14*3600, 14*3600, 60)
+loc = EarthLocation(lon=14.7819092*u.deg, lat=49.9090806*u.deg, height=530*u.m)
+alt = get_sun(Time(t, format='unix')).transform_to(
+	AltAz(obstime=Time(t, format='unix'), location=loc)).alt.deg
+def cross(h, down):
+	s = (alt[:-1] > h) & (alt[1:] <= h) if down else (alt[:-1] <= h) & (alt[1:] > h)
+	i = np.flatnonzero(s)
+	return int(t[i[0]] - m) if len(i) else 0
+print(f"tmdusk={cross(1, True)} tmnight={cross(-10, True)} "
+      f"tmdawn={cross(-10, False)} tmmorning={cross(1, False)}")
+PY
+)
+fi
 
-# CLOUD (sky minus ambient temperature, TEMP_AMB) from D50's rts2-logd
-mkdir -p meteo
-for d in $now1a $now2a; do
-	rsync -q lascaux50.asu.cas.cz:rts2-meteo-$d.log meteo/ 2>/dev/null
-done
-find meteo -name 'rts2-meteo-*.log' -mtime +3 -delete
-cat meteo/rts2-meteo-$now1a.log meteo/rts2-meteo-$now2a.log 2>/dev/null | grep "^CLOUD\>" |
+# CLOUD (sky minus ambient temperature, TEMP_AMB) from D50's rts2-logd: from a
+# local copy of lascaux50's /var/log/rts2-meteo-*.log where there is one
+# ($METEO, default /home/mates/meteo: zeus), else fetched into meteo/ (morpheus)
+METEO=${METEO:-/home/mates/meteo}
+if [ ! -d "$METEO" ]; then
+	METEO=meteo
+	mkdir -p meteo
+	for d in $now1a $now2a; do
+		rsync -q lascaux50.asu.cas.cz:rts2-meteo-$d.log meteo/ 2>/dev/null
+	done
+	find meteo -name 'rts2-meteo-*.log' -mtime +3 -delete
+fi
+cat $METEO/rts2-meteo-$now1a.log $METEO/rts2-meteo-$now2a.log 2>/dev/null | grep "^CLOUD\>" |
 	while read _ a b _ _ _ d; do echo $(date -ud ${a}T$b +%s) $d; done |
 	awk "\$1>$midnight+($tmdusk) && \$1<$midnight+$tmmorning" > cloud$$.dat
 test -s cloud$$.dat || echo "$midnight NaN" > cloud$$.dat
