@@ -71,6 +71,9 @@ cd "$tempdir"
 
 # Isolate IRAF state to avoid conflicts when running in parallel
 export HOME="$tempdir"
+# IRAF cl dies without TERM ("Environment variable 'TERM' not found"),
+# which is the case under cron, nohup or a non-interactive ssh
+export TERM="${TERM:-dumb}"
 
 # Find IRAF command (cl or irafcl depending on installation)
 if command -v cl &>/dev/null; then
