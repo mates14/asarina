@@ -7,6 +7,20 @@
 
 set -e
 
+# fitsheader: the C tool (-r/-w), not astropy's script of the same name, which
+# a Python bin dir early in PATH (venv, ~/opt/python3.12/bin) puts first.
+fitsheader() {
+    local fh
+    for fh in $(type -ap fitsheader); do
+        if [ "$(head -c 2 "$fh" 2>/dev/null)" != "#!" ]; then
+            "$fh" "$@"
+            return
+        fi
+    done
+    echo "no C fitsheader in PATH (only astropy's)" >&2
+    return 127
+}
+
 if [ -z "$1" ]; then
     echo "Usage: iraf_combine_dark.sh output.fits input1.fits input2.fits ..."
     exit 1
