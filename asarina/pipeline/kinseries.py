@@ -52,6 +52,11 @@ log = logging.getLogger("kinseries")
 TRIVIAL = (1, 2, 3, 4, 6, 12)
 POINTS = 12
 MAX_FRAME_STEP = 12   # frames: up to 12 x 12 frames (12 min of SBT 5 s frames)
+# Long frames (FRAM: 60 s + ~10 s overhead) would make the first light curve wait for
+# 12 frames, a quarter of an hour.  From EARLY_EXPTIME up, a step 0 runs on the first
+# EARLY_FRAMES frames as they are (EARLY_FRAMES points), then the usual 12 bins of k.
+EARLY_EXPTIME = 30.0
+EARLY_FRAMES = 6
 RAW_WAIT = 120        # [s] how long a series may wait for its raw frame to be archived
 REPORT_POLL = 5       # [s] while a step runs, look for the previous step's search results this often
 OBS_ACTIVE = 4 * 3600  # [s] observations untouched for longer are not looked at
@@ -176,11 +181,15 @@ def raw_ready(job):
 
 # ---------------------------------------------------------------- steps
 
-def due_step(nseries, state, kind='kinetic'):
+def due_step(nseries, state, kind='kinetic', exptime=0.0):
     done = state.get('done', []) + state.get('failed', [])
     if kind == 'frame':
         k = min(nseries // POINTS, MAX_FRAME_STEP)
-        return k if k >= 1 and k > max(done, default=0) else None
+        if k >= 1 and k > max(done, default=-1):
+            return k
+        if k == 0 and exptime >= EARLY_EXPTIME and nseries >= EARLY_FRAMES and not done:
+            return 0   # step 0: the first EARLY_FRAMES long frames, one point each
+        return None
     avail = [k for k in TRIVIAL if k <= nseries]
     if not avail:
         return None
@@ -200,11 +209,12 @@ def run_step(obs, series, k, args, state=None, spath=None):
         shutil.rmtree(out)
     os.makedirs(out)
     if series[0].get('kind') == 'frame':
-        use = series[:k * POINTS]
-        cmd = [sys.executable, '-m', 'asarina.pipeline.framestep', '--step', str(k),
+        use = series[:k * POINTS] if k else series[:EARLY_FRAMES]
+        cmd = [sys.executable, '-m', 'asarina.pipeline.framestep', '--step', str(max(k, 1)),
+               '--points', str(len(use) if k == 0 else POINTS),
                '-j', str(args.jobs), '-o', out] + [f"{j['fits']}:{j['ecsv']}" for j in use]
         cams = '+'.join(sorted(set(str(j['ccd']) for j in use)))
-        log.info(f"{os.path.basename(obs)}: step {k} ({len(use)} frames {cams}, bins of {k})")
+        log.info(f"{os.path.basename(obs)}: step {k} ({len(use)} frames {cams}, bins of {max(k, 1)})")
     else:
         nsub = min(j['kinnum'] for j in series[:k]) // POINTS * POINTS
         cmd = [sys.executable, '-m', 'asarina.pipeline.kinstep', '--step', str(k), '--nsub', str(nsub),
@@ -318,11 +328,13 @@ def serve(root, args):
             _save(spath, state)
         series = sorted((_load(p, None) for p in glob.glob(os.path.join(obs, 'series', '*.json'))),
                         key=lambda j: j['ctime'])
-        k = due_step(len(series), state, series[0].get('kind', 'kinetic') if series else 'kinetic')
+        k = due_step(len(series), state, series[0].get('kind', 'kinetic') if series else 'kinetic',
+                     series[0].get('exptime', 0.0) if series else 0.0)
         if k is None:
             continue
-        waiting = [j['stem'] for j in series[:k] if not raw_ready(j)]
-        if waiting and now - max(j['queued'] for j in series[:k]) < RAW_WAIT:
+        need = series[:max(k, EARLY_FRAMES if k == 0 else k)]
+        waiting = [j['stem'] for j in need if not raw_ready(j)]
+        if waiting and now - max(j['queued'] for j in need) < RAW_WAIT:
             continue  # RTS2 still archiving the raw frame
         ok = run_step(obs, series, k, args, state, spath)
         state.setdefault('done' if ok else 'failed', []).append(k)

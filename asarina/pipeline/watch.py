@@ -42,9 +42,20 @@ class FileMonitor:
                  file_pattern: str = "2*.fits",
                  exclude_patterns: List[str] = None,
                  poll_interval: float = 1.0,
-                 min_age: float = 0.0):
+                 min_age: float = 0.0,
+                 min_target: Optional[int] = None,
+                 every_file: bool = False):
         
         self.search_root = Path(search_root)
+        # Only target directories (RTS2 archive_path %b/%N/%t/%c/%f) whose
+        # numeric name is >= min_target: FRAM, triggers only (50000+).
+        self.min_target = min_target
+        # Queue every file not seen yet, oldest first, instead of the newest
+        # one only: nothing is lost while the workers are busy, and a restart
+        # catches up on the whole night (imgproc skips what has its ECSV).
+        self.every_file = every_file
+        self.seen = set()
+        self.seen_night = None
         # Seconds a file must sit unmodified before it is taken: where the
         # camera writes straight into the archive (Makak), the newest file may
         # still be growing.
@@ -56,48 +67,82 @@ class FileMonitor:
         self.last_file = None
         self.running = False
 
+    def latest_night(self) -> Optional[Path]:
+        """The newest night directory: {root}/YYYY/YYYYMMDD (D50, SBT) or
+        {root}/YYYYMMDD with the nights directly under the root (FRAM)."""
+        year_dirs = [d for d in self.search_root.glob("2???") if d.is_dir()]
+        if year_dirs:
+            base = max(year_dirs, key=lambda p: p.name)
+            logger.debug(f"Latest year directory: {base}")
+        else:
+            base = self.search_root
+        date_dirs = [d for d in base.glob("20??????") if d.is_dir()]
+        if not date_dirs:
+            logger.debug(f"No date directories found in {base}")
+            return None
+        latest_date = max(date_dirs, key=lambda p: p.name)
+        logger.debug(f"Latest date directory: {latest_date}")
+        return latest_date
+
+    def _target_ok(self, name: str) -> bool:
+        if self.min_target is None:
+            return True
+        return name.isdigit() and int(name) >= self.min_target
+
+    def candidate_files(self) -> List[Path]:
+        """The FITS files of the newest night, not filtered yet."""
+        latest_date = self.latest_night()
+        if latest_date is None:
+            return []
+        camera_path = latest_date / self.camera_pattern
+        fits_files = []
+        if camera_path.exists() and self.min_target is None:
+            # Direct camera directory exists - search it and subdirectories
+            fits_files.extend(camera_path.rglob(self.file_pattern))
+            logger.debug(f"Searching in {camera_path} and subdirectories")
+        else:
+            # Camera below the target directories: {night}/{target}/{camera}/
+            for subdir in latest_date.iterdir():
+                if subdir.is_dir() and self._target_ok(subdir.name):
+                    camera_subpath = subdir / self.camera_pattern
+                    if camera_subpath.exists():
+                        fits_files.extend(camera_subpath.rglob(self.file_pattern))
+                        logger.debug(f"Found camera directory: {camera_subpath}")
+        return fits_files
+
+    def find_new_files(self) -> List[str]:
+        """every_file mode: the files of the newest night not handed out yet, oldest first."""
+        night = self.latest_night()
+        if night != self.seen_night:
+            self.seen, self.seen_night = set(), night
+        files = []
+        settled = time.time() - self.min_age
+        for f in self.candidate_files():
+            s = str(f)
+            if s in self.seen or any(pattern in s for pattern in self.exclude_patterns):
+                continue
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue
+            if self.min_age > 0 and mtime > settled:
+                continue
+            files.append((mtime, s))
+        files.sort()
+        for _, s in files:
+            self.seen.add(s)
+        return [s for _, s in files]
+
     def find_latest_file(self) -> Optional[str]:
         """Find the most recent file matching criteria."""
         try:
-            # Find latest year directory
-            year_dirs = list(self.search_root.glob("2???"))
-            if not year_dirs:
-                logger.debug(f"No year directories found in {self.search_root}")
-                return None
-            latest_year = max(year_dirs, key=lambda p: p.name)
-            logger.debug(f"Latest year directory: {latest_year}")
-            
-            # Find latest date directory in that year
-            date_dirs = list(latest_year.glob("20??????"))
-            if not date_dirs:
-                logger.debug(f"No date directories found in {latest_year}")
-                return None
-            latest_date = max(date_dirs, key=lambda p: p.name)
-            logger.debug(f"Latest date directory: {latest_date}")
-            
-            # Find latest file in camera subdirectory
-            camera_path = latest_date / self.camera_pattern
-            fits_files = []
-            
-            if camera_path.exists():
-                # Direct camera directory exists - search it and subdirectories
-                fits_files.extend(camera_path.rglob(self.file_pattern))
-                logger.debug(f"Searching in {camera_path} and subdirectories")
-            else:
-                # No direct camera directory - search all subdirectories for camera pattern
-                logger.debug(f"Camera directory {camera_path} does not exist, searching subdirectories")
-                for subdir in latest_date.iterdir():
-                    if subdir.is_dir():
-                        camera_subpath = subdir / self.camera_pattern
-                        if camera_subpath.exists():
-                            fits_files.extend(camera_subpath.rglob(self.file_pattern))
-                            logger.debug(f"Found camera directory: {camera_subpath}")
-            
+            fits_files = self.candidate_files()
+
             if not fits_files:
                 logger.debug(f"No FITS files found matching pattern '{self.file_pattern}'")
                 return None
             
-            logger.debug(f"Found {len(fits_files)} FITS files in {camera_path}")
+            logger.debug(f"Found {len(fits_files)} FITS files")
             
             # Filter out excluded patterns
             filtered_files = []
@@ -135,6 +180,13 @@ class FileMonitor:
         
         while self.running:
             try:
+                if self.every_file:
+                    for f in self.find_new_files():
+                        logger.info(f"New file detected: {f}")
+                        process_queue.put(f)
+                    time.sleep(self.poll_interval)
+                    continue
+
                 latest_file = self.find_latest_file()
                 
                 if latest_file and latest_file != self.last_file:
@@ -447,6 +499,12 @@ def main():
     parser.add_argument('--min-age', type=float, default=0.0, metavar='S',
                         help='Take a file only once unmodified for S seconds (camera '
                              'writing straight into the archive; default 0)')
+    parser.add_argument('--min-target', type=int, metavar='N',
+                        help='Only target directories {night}/{target}/{camera}/ numbered N '
+                             'and up (FRAM: 50000, the triggers)')
+    parser.add_argument('--every-file', action='store_true',
+                        help='Queue every new file of the night, oldest first, not only the '
+                             'newest (a restart catches up on the night)')
     parser.add_argument('--frame-timeout', type=float, metavar='S',
                         help='Kill an imgproc run after S seconds (default: no limit)')
 
@@ -462,6 +520,8 @@ def main():
                      help='Path to SSH private key for database upload (no upload if omitted)')
     fwd.add_argument('--realtime', action='store_true',
                      help='Pass --realtime to imgproc (web preview, corrwerr, WCS-to-raw)')
+    fwd.add_argument('--kinseries-queue', action='store_true',
+                     help='Pass --kinseries-queue to imgproc (trigger light curves without --realtime)')
     fwd.add_argument('--no-raw-update', action='store_true',
                      help='Pass --no-raw-update to imgproc (archive not writable)')
     fwd.add_argument('--phdb-root')
@@ -498,7 +558,10 @@ def main():
         sys.exit(0)
 
     # Build the base imgproc command that will be prepended to each image path
-    imgproc_base = ['asarina-imgproc']
+    # imgproc of this installation, not whichever comes first in PATH
+    # (cron, systemd and su keep a PATH without the venv/user Python)
+    sibling = Path(sys.argv[0]).resolve().parent / 'asarina-imgproc'
+    imgproc_base = [str(sibling) if sibling.exists() else 'asarina-imgproc']
     for opt, dest in [('--config', 'config'), ('--camera', 'camera'),
                       ('--ssh-key', 'ssh_key'),
                       ('--phdb-root', 'phdb_root'), ('--phdb-date-fmt', 'phdb_date_fmt'),
@@ -515,6 +578,7 @@ def main():
         if val is not None:
             imgproc_base += [opt, str(val)]
     for opt, dest in [('--realtime', 'realtime'), ('--no-raw-update', 'no_raw_update'),
+                      ('--kinseries-queue', 'kinseries_queue'),
                       ('--phdb-by-night', 'phdb_by_night'), ('--makak', 'makak_mode'),
                       ('--sbt-window-patch', 'sbt_window_patch'), ('-f', 'force'),
                       ('-v', 'verbose')]:
@@ -534,6 +598,8 @@ def main():
     watcher.monitor.camera_pattern = args.camera_pattern
     watcher.monitor.poll_interval = args.poll_interval
     watcher.monitor.min_age = args.min_age
+    watcher.monitor.min_target = args.min_target
+    watcher.monitor.every_file = args.every_file
 
     logger.info(f"Starting watcher, imgproc base: {' '.join(imgproc_base)}")
     if args.systemd:

@@ -484,6 +484,9 @@ def main():
     output.add_argument('--png-root', default='/home/mates/png')
     output.add_argument('--kinseries-dir', metavar='DIR',
                         help='real time: queue kinetic series here for asarina-kinseries')
+    output.add_argument('--kinseries-queue', action='store_true',
+                        help='queue for asarina-kinseries without --realtime (a user-mode watcher '
+                             'beside RTS2, e.g. FRAM: no corrwerr, preview or transient daemon)')
     output.add_argument('--kinseries-frames', action='store_true',
                         help='also queue short frames of trigger targets (SBT C1+C2)')
     output.add_argument('--kinseries-max-exptime', type=float, default=15.0, metavar='S',
@@ -803,7 +806,7 @@ def main():
         # 8.9. Kinetic series: queue it for the progressive light curve (kinseries.py),
         # which runs detached as this user.  Real-time only, as the transient search,
         # and before it: that call may block for up to two minutes.
-        if ecsv_path is not None and args.realtime and args.kinseries_dir:
+        if ecsv_path is not None and (args.realtime or args.kinseries_queue) and args.kinseries_dir:
             try:
                 from asarina.pipeline.kinseries import queue_job
                 job = queue_job(args.kinseries_dir, raw_header, raw_path, ecsv_path,
