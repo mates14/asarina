@@ -1547,7 +1547,7 @@ def run_mixdark(output: str, input_files: list, maxparam: int = 150) -> bool:
     mixdark_path = find_script("mixdark.py")
 
     # mixdark.py handles chunking and parallelism internally
-    cmd = ["python3", str(mixdark_path), output] + input_files
+    cmd = [sys.executable, str(mixdark_path), output] + input_files
     log(f"Running: {cmd[0]} {cmd[1]} {cmd[2]} [{len(input_files)} files]", "debug")
     result = subprocess.run(cmd, capture_output=True, text=True)
 
@@ -1585,7 +1585,7 @@ def run_mixflat(output: str, input_files: list, names: dict = None) -> bool:
     mixflat_path = find_script("mixflat.py")
 
     # mixflat.py handles chunking and parallelism internally
-    cmd = ["python3", str(mixflat_path), output] + input_files
+    cmd = [sys.executable, str(mixflat_path), output] + input_files
     result = subprocess.run(cmd, capture_output=True, text=True)
 
     if result.returncode != 0:
