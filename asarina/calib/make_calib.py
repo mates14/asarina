@@ -667,13 +667,13 @@ def night_dirs(archive_base: str, year: str) -> list:
 TARGET_ID_RE = re.compile(r"^\d{5}$")          # RTS2 target id, e.g. 00001
 CALIB_DIR_NAMES = {                            # accepted calib dir spellings
     "dark": ("dark", "darks"),
-    "flat": ("flat", "flats"),
+    "flat": ("flat", "flats", "skyflats"),
 }
 CALIB_TARGET_IDS = {                           # RTS2 convention: tgt 1=dark, 2=flat
     "dark": "00001",
     "flat": "00002",
 }
-_NIGHT_CONTENT_DIRS = {"dark", "darks", "flat", "flats"}
+_NIGHT_CONTENT_DIRS = {"dark", "darks", "flat", "flats", "skyflats"}
 
 
 def _is_night_contents(d: Path) -> bool:
@@ -758,8 +758,9 @@ def find_calibration_files(archive_base: str, year: str,
     physical camera is done downstream by camera_id from the header, not here.
     Handles both the multi-camera layout ({year}/{night}/<camera>/dark[s]/) and
     the single-camera layout ({year}/{night}/dark[s]/), also with the nights
-    directly under the base ({YYYYMMDD}/..., FRAM), accepts both 'dark' and
-    'darks' spellings, the RTS2 target-id convention (00001=dark, 00002=flat),
+    directly under the base ({YYYYMMDD}/..., FRAM) and the camera directory
+    below the calib one ({night}/darks/<camera>/, FRAM), accepts 'dark'/'darks'
+    and 'flat'/'flats'/'skyflats' spellings, the RTS2 target-id convention (00001=dark, 00002=flat),
     and both '.fits' and Rice-compressed '.fitz' extensions, each possibly
     bzip2-compressed on top ('.fits.bz2' in the old D50 archive; astropy and
     cfitsio read those transparently). The path is only a
@@ -786,6 +787,8 @@ def find_calibration_files(archive_base: str, year: str,
         for sub in calib_subdirs:
             for ext in exts:
                 files.update(glob.glob(f"{prefix}/{sub}/20*.{ext}"))
+                # camera below the calib dir: {night}/darks/<camera>/ (FRAM)
+                files.update(glob.glob(f"{prefix}/{sub}/*/20*.{ext}"))
 
     return sorted(files)
 
