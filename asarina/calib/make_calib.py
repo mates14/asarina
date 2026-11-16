@@ -631,10 +631,33 @@ def discover_years(archive_base: str) -> list:
         return years
 
     for entry in sorted(base.iterdir()):
-        if entry.is_dir() and entry.name.isdigit() and len(entry.name) == 4:
+        if not (entry.is_dir() and entry.name.isdigit()):
+            continue
+        if len(entry.name) == 4:                      # {year}/{night}/...
             years.append(entry.name)
+        elif len(entry.name) == 8:                    # flat: {night}/... (FRAM)
+            years.append(entry.name[:4])
 
-    return years
+    return sorted(set(years))
+
+
+def night_glob(archive_base: str, year: str) -> str:
+    """Glob pattern matching the night directories of *year*.
+
+    Most archives group nights by year ({base}/{year}/{night}/); some (FRAM)
+    keep the nights directly under the base ({base}/{YYYYMMDD}/). A year
+    directory, when present, wins.
+    """
+    if (Path(archive_base) / year).is_dir():
+        return f"{archive_base}/{year}/*"
+    return f"{archive_base}/{year}[0-9][0-9][0-9][0-9]"
+
+
+def night_dirs(archive_base: str, year: str) -> list:
+    """Sorted night directories of *year*, for either archive structure."""
+    import glob
+    return sorted(Path(p) for p in glob.glob(night_glob(archive_base, year))
+                  if Path(p).is_dir())
 
 
 # Directory-name conventions for calibration frames. Camera-level directory
@@ -678,12 +701,12 @@ def detect_layout(archive_base: str, year: str, sample: int = 30) -> str:
                ({year}/{night}/<camera>/dark/).
     Decided by inspecting directory *content*, not names.
     """
-    year_path = Path(archive_base) / year
-    if not year_path.exists():
+    nights = night_dirs(archive_base, year)
+    if not nights:
         return "single"
 
     single = multi = 0
-    for night in sorted(p for p in year_path.iterdir() if p.is_dir()):
+    for night in nights:
         if _is_night_contents(night):
             single += 1
         else:
@@ -734,7 +757,8 @@ def find_calibration_files(archive_base: str, year: str,
     Scans every camera (their directory names are arbitrary); selecting a single
     physical camera is done downstream by camera_id from the header, not here.
     Handles both the multi-camera layout ({year}/{night}/<camera>/dark[s]/) and
-    the single-camera layout ({year}/{night}/dark[s]/), accepts both 'dark' and
+    the single-camera layout ({year}/{night}/dark[s]/), also with the nights
+    directly under the base ({YYYYMMDD}/..., FRAM), accepts both 'dark' and
     'darks' spellings, the RTS2 target-id convention (00001=dark, 00002=flat),
     and both '.fits' and Rice-compressed '.fitz' extensions, each possibly
     bzip2-compressed on top ('.fits.bz2' in the old D50 archive; astropy and
@@ -753,9 +777,9 @@ def find_calibration_files(archive_base: str, year: str,
     calib_subdirs = list(calib_dirs) + [target_id]
 
     if layout == "multi":
-        prefixes = [f"{archive_base}/{year}/*/*"]  # night/<camera>
+        prefixes = [f"{night_glob(archive_base, year)}/*"]  # night/<camera>
     else:
-        prefixes = [f"{archive_base}/{year}/*"]    # night/
+        prefixes = [night_glob(archive_base, year)]         # night/
 
     files = set()
     for prefix in prefixes:
