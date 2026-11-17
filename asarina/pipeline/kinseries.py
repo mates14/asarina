@@ -12,7 +12,8 @@ detached, in its own session).  Only one runner works at a time (flock on <dir>/
 a second one exits at once.  With nothing to do for --idle seconds the runner exits;
 the next kinetic series starts it again.
 
-The runner groups the jobs by observation (OBSID, filter; C1 and C2 of SBT together).
+The runner groups the jobs by observation (OBSID, filter; C1 and C2 of SBT together;
+short frames also by exposure time, <date>-<obsid>-<filter>-<exptime>s).
 Kinetic series: with n series in, it runs the newest "trivial" step k <= n not done yet
 (k = 1, 2, 3, 4, 6, 12, see kinstep.py).  Frames: with n frames in, step k = n // 12
 (12 bins of k frames).  A step that has gone stale while an earlier one was running is
@@ -147,6 +148,10 @@ def ingest(root):
             os.rename(path, path + '.bad')
             continue
         key = f"{job['obsid']}-{job['filter']}"
+        if job.get('kind') == 'frame':
+            # one series per exposure time: a trigger script's 20 s fast block and
+            # the 60 s frames after it are separate light curves, not mixed bins
+            key += f"-{job['exptime']:g}s"
         hits = glob.glob(os.path.join(root, 'obs', f"*-{key}"))
         obs = hits[0] if hits else os.path.join(root, 'obs', f"{job['stem'][:8]}-{key}")
         os.makedirs(os.path.join(obs, 'series'), exist_ok=True)
