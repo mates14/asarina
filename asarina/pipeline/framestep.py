@@ -112,6 +112,27 @@ def make_skel(frames, path):
     return h
 
 
+def exposure_bins(exptimes, points, tol=0.01):
+    """Split frames (their exposure times, in time order) into `points` consecutive bins of
+    equal summed exposure, on frame boundaries: [[i, ...], ...], or None when they do not
+    split exactly (20 s and 60 s frames: 12 x 20 s, or 12 x 20 + 8 x 60 s into 60 s bins).
+    Equal exposures: bins of len // points frames, as --step."""
+    e = np.asarray(exptimes, float)
+    if len(e) < points or np.any(e <= 0):
+        return None
+    target = e.sum() / points
+    bins, cur, acc = [], [], 0.0
+    for i, x in enumerate(e):
+        cur.append(i)
+        acc += x
+        if acc >= target * (1 - tol):
+            if abs(acc - target) > tol * target:
+                return None
+            bins.append(cur)
+            cur, acc = [], 0.0
+    return bins if len(bins) == points and not cur else None
+
+
 def bin_header(skel, frames, k, first_hdr):
     hdr = skel.copy()
     for key in ('NAXIS', 'NAXIS1', 'NAXIS2'):
@@ -142,7 +163,9 @@ def main():
     os.environ.setdefault('TERM', 'xterm')
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('frames', nargs='+', help='calibrated frames in time order, FITS[:ECSV]')
-    ap.add_argument('--step', type=int, help='frames per bin (default: all frames // points)')
+    ap.add_argument('--step', type=int, help='frames per bin, equal exposures (default: all the frames, '
+                                             'in bins of equal summed exposure, see exposure_bins)')
+    ap.add_argument('--label', type=int, help='the step number for step.json (default: frames in the first bin)')
     ap.add_argument('--points', type=int, default=POINTS, help=f'light-curve points (default {POINTS})')
     ap.add_argument('--filter-terms', default=None,
                     help="fixed colour terms for dophot (default filter_terms_<filter> of the asarina config)")
@@ -162,16 +185,36 @@ def main():
         logging.getLogger(name).setLevel(logging.WARNING)
     t_all = time.time()
 
-    k = args.step or len(args.frames) // args.points
-    n = k * args.points
-    if k < 1 or len(args.frames) < n:
-        ap.error(f"step {k} needs {n} frames, {len(args.frames)} given")
-    frames = sorted((Frame(s) for s in args.frames[:n]), key=lambda f: f.t0)
+    if args.step:
+        k = args.step
+        n = k * args.points
+        if k < 1 or len(args.frames) < n:
+            ap.error(f"step {k} needs {n} frames, {len(args.frames)} given")
+        frames = sorted((Frame(s) for s in args.frames[:n]), key=lambda f: f.t0)
+        members = [list(range(b * k, (b + 1) * k)) for b in range(args.points)]
+    else:
+        frames = sorted((Frame(s) for s in args.frames), key=lambda f: f.t0)
+        members = exposure_bins([f.exptime for f in frames], args.points)
+        if members is None:
+            ap.error(f"{len(frames)} frames ({sorted(set(f.exptime for f in frames))} s) do not split into "
+                     f"{args.points} bins of equal exposure")
+        n, k = len(frames), len(members[0])
     bad = [f.stem for f in frames if not np.isfinite(f.zp)]
     if bad:
         raise SystemExit(f"no MAGZERO in the ECSV of {bad}")
+    # exposure weights in units of the shortest frame (integers: the coverage stays uint16)
+    emin = min(f.exptime for f in frames)
+    wts = [f.exptime / emin for f in frames]
+    if any(abs(w - round(w)) > 0.02 for w in wts):
+        raise SystemExit(f"exposures {sorted(set(f.exptime for f in frames))} s are not multiples of {emin} s")
+    wts = [int(round(w)) for w in wts]
+    bin_of = {i: b for b, m in enumerate(members) for i in m}
+    exp0 = frames[0].exptime
     cams = sorted(set(f.camera for f in frames))
-    log.info(f"step {k}: {n} frames ({'+'.join(cams)}) -> {args.points} bins of {k}")
+    sizes = sorted(set(len(m) for m in members))
+    log.info(f"step {args.label if args.label is not None else k}: {n} frames ({'+'.join(cams)}, "
+             f"{'+'.join(f'{e:g}' for e in sorted(set(f.exptime for f in frames)))} s) -> {args.points} bins of "
+             f"{sum(frames[i].exptime for i in members[0]):g} s ({'/'.join(map(str, sizes))} frames)")
 
     outdir = os.path.abspath(args.outdir or f"{frames[0].stem}-fstep{k}")
     work = f"{outdir}/work"
@@ -197,12 +240,14 @@ def main():
         ny, nx = f.shape
         cov = (rs.x >= 0) & (rs.x <= nx - 1) & (rs.y >= 0) & (rs.y <= ny - 1)
         img[~cov] = 0
-        b = i // k
+        b, w = bin_of[i], wts[i]
+        # exposure-weighted: a 60 s frame counts three times a 20 s one (both on the
+        # first frame's flux scale already, through the zeropoints)
         with lock:
-            acc[b] += img
-            cnt[b] += cov
-            acc[-1] += img
-            cnt[-1] += cov
+            acc[b] += img * w
+            cnt[b] += cov * np.uint16(w)
+            acc[-1] += img * w
+            cnt[-1] += cov * np.uint16(w)
 
     # a pixel map takes ~60 B/px while it is built: 1k frames in parallel, 4k ones (~1 GB
     # each) two at a time
@@ -217,24 +262,27 @@ def main():
         c = cnt[j]
         return np.where(c > 0, acc[j] / np.maximum(c, 1) * scale, 0).astype(np.float32), c
 
+    # the weighted mean times the summed exposure in units of the first frame's: a bin has
+    # the signal of its whole exposure (equal exposures: the mean times k, as before)
     bins = []
-    for b in range(args.points):
-        fr = frames[b * k:(b + 1) * k]
-        img, _ = mean_of(b, k)
+    for b, m in enumerate(members):
+        fr = [frames[i] for i in m]
+        img, _ = mean_of(b, sum(f.exptime for f in fr) / exp0)
         ts = fr[0].t0
         name = (time.strftime('%Y%m%d%H%M%S', time.gmtime(ts)) + f"-{int((ts % 1) * 1000):03d}"
-                + f"-{fr[0].hdr.get('FILTER', 'UNK')}-f{b * k:03d}b{k}")
-        fits.PrimaryHDU(data=img, header=bin_header(skel, fr, k, fr[0].hdr)).writeto(f"{work}/{name}.fits",
-                                                                                   overwrite=True)
+                + f"-{fr[0].hdr.get('FILTER', 'UNK')}-f{m[0]:03d}b{len(m)}")
+        fits.PrimaryHDU(data=img, header=bin_header(skel, fr, len(fr), fr[0].hdr)).writeto(f"{work}/{name}.fits",
+                                                                                         overwrite=True)
         bins.append(name)
 
-    deep, cnt = mean_of(-1, n)
+    deep, cnt = mean_of(-1, sum(f.exptime for f in frames) / exp0)
+    cnt = cnt / max(1, min(wts))   # coverage in frames of the shortest exposure
     hdr = bin_header(skel, frames, n, frames[0].hdr)
     hdr['KINSTEP'] = (k, 'frames per bin of this step')
     fits.PrimaryHDU(data=deep, header=hdr).writeto(f"{work}/deep.fits", overwrite=True)
     del acc
     log.info(f"{len(bins)} bins and the deep image in {time.time() - t:.1f}s "
-             f"(coverage {int(cnt.max())} frames, {np.mean(cnt >= n / 2) * 100:.0f}% of the grid by half or more)")
+             f"(coverage {int(cnt.max())} frame-weights, {np.mean(cnt >= cnt.max() / 2) * 100:.0f}% of the grid by half or more)")
 
     # 4. deep photometry
     fterms = args.filter_terms if args.filter_terms is not None else config_filter_terms(frames[0].hdr)
@@ -271,8 +319,12 @@ def main():
                      f"N {m.get('IDNUM')} (phcat {tt[0]:.1f} cat2det {tt[1]:.1f} dophot {tt[2]:.1f} s)")
     log.info(f"{nok}/{len(bins)} bins in {time.time() - t:.1f}s; total {time.time() - t_all:.1f}s -> {outdir}")
     with open(f"{outdir}/step.json", 'w') as f:
-        json.dump({'step': k, 'frames': [fr.stem for fr in frames], 'bins': len(bins), 'bins_ok': nok,
-                   'bin_seconds': round(frames[k - 1].t0 + frames[k - 1].exptime - frames[0].t0, 2),
+        last = frames[members[0][-1]]
+        json.dump({'step': args.label if args.label is not None else k, 'frames': [fr.stem for fr in frames],
+                   'bins': len(bins), 'bins_ok': nok,
+                   'bin_seconds': round(last.t0 + last.exptime - frames[0].t0, 2),
+                   'bin_exposure': round(sum(frames[i].exptime for i in members[0]), 2),
+                   'exptimes': sorted(set(f.exptime for f in frames)),
                    'deep_objects': len(dcat), 'deep_limit': float(dcat.meta.get('MAGLIMIT', np.nan)),
                    'seconds': round(time.time() - t_all, 1)}, f)
     # the deep image stays for the finding chart (trigreport); the runner keeps only the latest

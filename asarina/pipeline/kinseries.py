@@ -12,8 +12,10 @@ detached, in its own session).  Only one runner works at a time (flock on <dir>/
 a second one exits at once.  With nothing to do for --idle seconds the runner exits;
 the next kinetic series starts it again.
 
-The runner groups the jobs by observation (OBSID, filter; C1 and C2 of SBT together;
-short frames also by exposure time, <date>-<obsid>-<filter>-<exptime>s).
+The runner groups the jobs by observation (OBSID, filter; C1 and C2 of SBT together).
+Frames of different exposures (FRAM: a 20 s fast block, then 60 s) share one light curve
+in bins of equal summed exposure (framestep.exposure_bins): a step runs on the longest
+prefix of the frames that splits into 12 such bins exactly.
 Kinetic series: with n series in, it runs the newest "trivial" step k <= n not done yet
 (k = 1, 2, 3, 4, 6, 12, see kinstep.py).  Frames: with n frames in, step k = n // 12
 (12 bins of k frames).  A step that has gone stale while an earlier one was running is
@@ -31,6 +33,8 @@ Layout of <dir> (config key kinseries_dir, e.g. /home/mates/kinseries):
                                     kinstep.log, transients.log, flares.txt
   kinseries.log                     the runner log
   lock
+  step-hook                         optional, executable: run with the observation directory
+                                    after each step's report (trigreport update)
 
 Usage:
   asarina-kinseries --dir /home/mates/kinseries          # as imgproc starts it
@@ -148,10 +152,6 @@ def ingest(root):
             os.rename(path, path + '.bad')
             continue
         key = f"{job['obsid']}-{job['filter']}"
-        if job.get('kind') == 'frame':
-            # one series per exposure time: a trigger script's 20 s fast block and
-            # the 60 s frames after it are separate light curves, not mixed bins
-            key += f"-{job['exptime']:g}s"
         hits = glob.glob(os.path.join(root, 'obs', f"*-{key}"))
         obs = hits[0] if hits else os.path.join(root, 'obs', f"{job['stem'][:8]}-{key}")
         os.makedirs(os.path.join(obs, 'series'), exist_ok=True)
@@ -186,15 +186,27 @@ def raw_ready(job):
 
 # ---------------------------------------------------------------- steps
 
-def due_step(nseries, state, kind='kinetic', exptime=0.0):
+def due_frame_step(series, state):
+    """Frames: (step number, frames used, points) of the step to run now, or None.
+    The longest prefix past the last step's that splits into POINTS bins of equal summed
+    exposure (equal exposures: 12, 24, 36, ... frames; 12 x 20 s + 8 x 60 s splits too),
+    at most MAX_FRAME_STEP x POINTS frames.  Before the first such step, frames of
+    EARLY_EXPTIME and more get step 0: the first EARLY_FRAMES of them, one point each."""
+    from asarina.pipeline.framestep import exposure_bins
     done = state.get('done', []) + state.get('failed', [])
-    if kind == 'frame':
-        k = min(nseries // POINTS, MAX_FRAME_STEP)
-        if k >= 1 and k > max(done, default=-1):
-            return k
-        if k == 0 and exptime >= EARLY_EXPTIME and nseries >= EARLY_FRAMES and not done:
-            return 0   # step 0: the first EARLY_FRAMES long frames, one point each
-        return None
+    last_n = state.get('last_n', 0)
+    exps = [j.get('exptime', 0.0) for j in series]
+    for n in range(min(len(series), MAX_FRAME_STEP * POINTS), last_n, -1):
+        if exposure_bins(exps[:n], POINTS) is not None:
+            return max(done, default=0) + 1, n, POINTS
+    if not done and exps and exps[0] >= EARLY_EXPTIME and len(series) >= EARLY_FRAMES \
+            and exposure_bins(exps[:EARLY_FRAMES], EARLY_FRAMES) is not None:
+        return 0, EARLY_FRAMES, EARLY_FRAMES
+    return None
+
+
+def due_step(nseries, state, kind='kinetic'):
+    done = state.get('done', []) + state.get('failed', [])
     avail = [k for k in TRIVIAL if k <= nseries]
     if not avail:
         return None
@@ -204,7 +216,7 @@ def due_step(nseries, state, kind='kinetic', exptime=0.0):
     return k
 
 
-def run_step(obs, series, k, args, state=None, spath=None):
+def run_step(obs, series, k, args, state=None, spath=None, nframes=None, points=POINTS):
     """kinstep on the first k series of the observation (framestep on its first 12k
     frames); True if it produced bins.  While it runs, the previous step's search results
     are reported as soon as they appear (state, spath: the observation's state), so that
@@ -214,12 +226,13 @@ def run_step(obs, series, k, args, state=None, spath=None):
         shutil.rmtree(out)
     os.makedirs(out)
     if series[0].get('kind') == 'frame':
-        use = series[:k * POINTS] if k else series[:EARLY_FRAMES]
-        cmd = [sys.executable, '-m', 'asarina.pipeline.framestep', '--step', str(max(k, 1)),
-               '--points', str(len(use) if k == 0 else POINTS),
+        use = series[:nframes]
+        cmd = [sys.executable, '-m', 'asarina.pipeline.framestep', '--points', str(points), '--label', str(k),
                '-j', str(args.jobs), '-o', out] + [f"{j['fits']}:{j['ecsv']}" for j in use]
         cams = '+'.join(sorted(set(str(j['ccd']) for j in use)))
-        log.info(f"{os.path.basename(obs)}: step {k} ({len(use)} frames {cams}, bins of {max(k, 1)})")
+        exps = '+'.join(f"{e:g}" for e in sorted(set(j.get('exptime', 0) for j in use)))
+        log.info(f"{os.path.basename(obs)}: step {k} ({len(use)} frames {cams}, {exps} s, "
+                 f"{points} bins of {sum(j.get('exptime', 0) for j in use) / points:g} s)")
     else:
         nsub = min(j['kinnum'] for j in series[:k]) // POINTS * POINTS
         cmd = [sys.executable, '-m', 'asarina.pipeline.kinstep', '--step', str(k), '--nsub', str(nsub),
@@ -292,10 +305,16 @@ def report_flares(obs, state):
                  + (f"{len(cand)} candidate(s)" if cand else "nothing"))
         for ln in cand[:5]:
             log.info(f"    {ln}")
-        # the human side: report, page on lascaux, Telegram (trigreport), detached
-        subprocess.Popen([sys.executable, '-m', 'asarina.pipeline.trigreport', 'update', obs],
-                         stdin=subprocess.DEVNULL, stdout=open(os.path.join(obs, 'trigreport.log'), 'a'),
-                         stderr=subprocess.STDOUT, start_new_session=True)
+        # the human side: report, page on lascaux, Telegram (trigreport), detached; then the
+        # site's step hook, if any (<dir>/step-hook <obsdir>, executable: FRAM LL ships the
+        # observation to zeus and starts the deep search there)
+        hook = os.path.join(os.path.dirname(os.path.dirname(obs)), 'step-hook')
+        cmd = [sys.executable, '-m', 'asarina.pipeline.trigreport', 'update', obs]
+        if os.access(hook, os.X_OK):
+            cmd = ['sh', '-c', '"$0" "$@"; "$HOOK" "$OBS"'] + cmd
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=open(os.path.join(obs, 'trigreport.log'), 'a'),
+                         stderr=subprocess.STDOUT, start_new_session=True,
+                         env=dict(os.environ, HOOK=hook, OBS=obs))
         # the deep image of the older steps is not needed any more (the chart is the latest's)
         # (only those of earlier steps: a later one may be running right now, see run_step)
         newest = max(state.get('done', [k]))
@@ -333,16 +352,25 @@ def serve(root, args):
             _save(spath, state)
         series = sorted((_load(p, None) for p in glob.glob(os.path.join(obs, 'series', '*.json'))),
                         key=lambda j: j['ctime'])
-        k = due_step(len(series), state, series[0].get('kind', 'kinetic') if series else 'kinetic',
-                     series[0].get('exptime', 0.0) if series else 0.0)
-        if k is None:
-            continue
-        need = series[:max(k, EARLY_FRAMES if k == 0 else k)]
+        if series and series[0].get('kind') == 'frame':
+            due = due_frame_step(series, state)
+            if due is None:
+                continue
+            k, nframes, points = due
+            need = series[:nframes]
+        else:
+            k = due_step(len(series), state, series[0].get('kind', 'kinetic') if series else 'kinetic')
+            if k is None:
+                continue
+            nframes, points, need = None, POINTS, series[:k]
         waiting = [j['stem'] for j in need if not raw_ready(j)]
         if waiting and now - max(j['queued'] for j in need) < RAW_WAIT:
             continue  # RTS2 still archiving the raw frame
-        ok = run_step(obs, series, k, args, state, spath)
+        ok = run_step(obs, series, k, args, state, spath, nframes=nframes, points=points)
         state.setdefault('done' if ok else 'failed', []).append(k)
+        if nframes:
+            state['last_n'] = nframes
+            state.setdefault('step_frames', {})[str(k)] = nframes
         _save(spath, state)
         did = True
         break   # newest data first: go back to the spool before the next step
