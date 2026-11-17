@@ -505,6 +505,9 @@ def main():
     parser.add_argument('--every-file', action='store_true',
                         help='Queue every new file of the night, oldest first, not only the '
                              'newest (a restart catches up on the night)')
+    parser.add_argument('--command', metavar='CMD',
+                        help='run CMD <image> for every new image instead of asarina-imgproc (the '
+                             'imgproc options below are then not passed; FRAM LL: the upload to zeus)')
     parser.add_argument('--frame-timeout', type=float, metavar='S',
                         help='Kill an imgproc run after S seconds (default: no limit)')
 
@@ -584,6 +587,10 @@ def main():
                       ('-v', 'verbose')]:
         if getattr(args, dest):
             imgproc_base.append(opt)
+
+    if args.command:
+        import shlex
+        imgproc_base = shlex.split(args.command)
 
     watcher = AutomatedPipeline(
         use_systemd=args.systemd,
