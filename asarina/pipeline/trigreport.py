@@ -237,6 +237,7 @@ def build(obs):
         tt = [(t.meta['JD'] - t0) * 86400 for t in bt]
         step_info.append(dict(step=sj['step'], bins=sj.get('bins_ok'), bin_seconds=sj.get('bin_seconds'),
                               deep_limit=_f(sj.get('deep_limit'), 2), seconds=sj.get('seconds'),
+                              bin_exposure_s=_f(sj.get('bin_exposure'), 1),
                               t_first=_f(min(tt), 0), t_last=_f(max(tt) + bt[-1].meta.get('EXPTIME', 0), 0),
                               bin_limit=_f(np.nanmedian([t.meta.get('MAGLIMIT', np.nan) for t in bt]), 2),
                               exposure_bin_s=_f(np.median([t.meta.get('EXPTIME', np.nan) for t in bt]), 2),
@@ -346,7 +347,7 @@ def build(obs):
 
 # ---------------------------------------------------------------- products
 
-STEP_MARKERS = ['o', 's', '^', 'D', 'v', 'P', 'X', 'h', '<', '>', 'p', '*']
+STEP_MARKERS = ['o', 's', '^', 'D', 'P', 'X', 'h', '<', '>', 'p', '*', 'd']   # no 'v': the limits
 
 
 def plot_lc(rec, stepdir, path):
@@ -384,7 +385,9 @@ def plot_lc(rec, stepdir, path):
         label = f"{c['cls']} {c['ra']:.5f} {c['dec']:+.5f}"
         if window is None:
             good = allp[allp[:, 2] < 1.0] if np.any(allp[:, 2] < 1.0) else allp
-            ys = list(good[:, 1] - good[:, 2]) + list(good[:, 1] + good[:, 2]) + [e[1] for e in ex]
+            # the extrapolation only where it is meaningful (a SPIKE's runs off to 23 mag)
+            ys = (list(good[:, 1] - good[:, 2]) + list(good[:, 1] + good[:, 2])
+                  + [e[1] for e in ex if e[2] is not None and e[2] < 0.5])
             if quiet is not None:
                 ys.append(quiet)
             lo, hi = min(ys), max(ys)
@@ -419,14 +422,20 @@ def plot_lc(rec, stepdir, path):
     if window is not None:
         ax.set_ylim(window[0], window[1])
     if times and min(times) > 0:
+        from matplotlib.ticker import LogLocator, ScalarFormatter, NullFormatter
         ax.set_xscale('log')
+        span = max(times) / min(times)
+        if span < 30:   # under a decade and a half: label more than the powers of ten
+            ax.xaxis.set_major_locator(LogLocator(subs=range(1, 10) if span < 4 else (1, 2, 3, 5)))
+            ax.xaxis.set_minor_formatter(NullFormatter())
+        ax.xaxis.set_major_formatter(ScalarFormatter())
     ax.invert_yaxis()
     ax.set_xlabel('time since trigger [s]' if rec['trigger'] else 'time since the first frame [s]')
     ax.set_ylabel(f"magnitude ({rec['filter']}, calibrated to r)" if rec['filter'] in ('N', 'clear') else 'magnitude')
     t = rec['trigger']['name'] if rec['trigger'] else rec['object']
     ax.set_title(f"{rec['site']} {t}, steps {steps[0]}..{last}" if len(steps) > 1 else f"{rec['site']} {t}, step {last}")
     ax.grid(alpha=0.3, which='both')
-    bsec = {s['step']: s.get('exposure_bin_s') for s in rec.get('steps', [])}
+    bsec = {s['step']: s.get('bin_exposure_s') or s.get('exposure_bin_s') for s in rec.get('steps', [])}
     step_handles = [Line2D([], [], ls='none', marker=mk[k], color='k', mfc='k' if k == last else 'none', ms=5,
                            label=f"step {k}" + (f" ({bsec[k]:g} s bins)" if bsec.get(k) else ''))
                     for k in steps]
