@@ -14,8 +14,10 @@ Per step:
   2. every frame resampled onto it with its own solution (the per-frame pixel map of
      kinstep, flux conserving) and scaled to the first frame's zeropoint: the cameras
      differ, and so does the transparency from frame to frame,
-  3. bin = mean of its frames where they cover the pixel, times k (a k-frame exposure
-     everywhere, the background stays continuous across the edge of one camera's field),
+  3. bin = exposure-weighted mean of its frames where they cover the pixel, times its summed
+     exposure (in the first frame's), with outliers rejected over the whole series
+     (stack_strip: cosmic rays, satellites, bad columns; a source lasting two or more
+     frames is kept; --stack mean for the plain mean),
   4. deep = the same over all 12k frames, x 12k: phcat -> cat2det -> dophot (the first
      frame's spatial response fixed, zeropoint free) -> the deep catalogue,
   5. every bin: phcat -D deep.fits (forced photometry at the deep positions), cat2det,
@@ -36,13 +38,15 @@ import logging
 import os
 import shutil
 import sys
-import threading
 import time
 
 import numpy as np
 from astropy.io import fits
 from astropy.table import Table
 from astropy.wcs import WCS
+
+from pyrt.core.stack import _sky, _sky_at, MESH
+from scipy.ndimage import binary_dilation
 
 from asarina.pipeline.kinphot import ref_wcs_and_response, fixed_terms, WCS_RE, STALE_TIME
 from asarina.pipeline.kinstep import (Resampler, copy_keys, mark_accumulated, photometry, merge_terms,
@@ -53,6 +57,16 @@ log = logging.getLogger("framestep")
 POINTS = 12
 MARGIN = 8   # [px] inside the common footprint
 RESAMPLE_MEM = 2.5e9   # [B] for the pixel maps being built at the same time
+STACK_MEM = 1.5e9      # [B] for a strip of the frame cube and its work arrays
+# outlier rejection (as pyrt.core.stack, which pyrt-combine uses): against the per-pixel
+# median of the sky-subtracted frames, noise from each frame's own rms and its signal
+CLIP_HI, CLIP_LO = 4.0, 6.0
+CLIP_AMP = 1.0         # tolerance as a fraction of the median: the cores of bright stars
+                       # differ from frame to frame with the seeing
+CLIP_NEAR = 2.0        # [sigma] a high pixel with a neighbour in time this high is a source
+                       # lasting more than one frame (a fading afterglow, a flare), not a hit
+CLIP_MIN = 5           # frames on a pixel to test it at all
+GROW = 1               # [px] a rejected pixel's neighbours go with it (the resampling spreads a hit)
 
 
 class Frame:
@@ -133,6 +147,67 @@ def exposure_bins(exptimes, points, tol=0.01):
     return bins if len(bins) == points and not cur else None
 
 
+def stack_strip(X, Sk, rms, kg, wts, groups, clip=True):
+    """Rows of the frame cube X (frames x rows x cols, flux on the first frame's zeropoint, NaN
+    off a frame) and their skies Sk -> the weighted means of the frame groups (the bins and
+    the deep image, wts the frames' exposure weights), the coverage of all the frames
+    (weights summed), the rejected frames per pixel.
+
+    Rejection (clip): x = X - sky against the per-pixel median over all the frames,
+    s^2 = rms^2 + kg max(x, 0); rejected above median + CLIP_HI s + CLIP_AMP |median| (cosmic
+    rays, satellites, planes) unless a frame next to it in time is CLIP_NEAR s high as well
+    (a real source changing over the series stays: the afterglow in the early frames), or below
+    median - CLIP_LO s - CLIP_AMP |median| (bad columns); grown by GROW px; second pass about
+    the weighted mean of what passed.  A group whose frames are all rejected on a pixel keeps
+    them there (a one-frame bin is never clipped).  The mean: of x over what passed, plus the
+    weighted mean sky of all the frames covering the pixel (a rejection does not step the
+    level by that frame's sky offset)."""
+    import warnings
+    n = X.shape[0]
+    ok = np.isfinite(X)
+    x = np.where(ok, X - Sk, np.nan)
+    w = np.asarray(wts, np.float32)[:, None, None]
+    keep = ok.copy()
+    if clip:
+        S = np.sqrt(np.asarray(rms, np.float32)[:, None, None] ** 2
+                    + np.asarray(kg, np.float32)[:, None, None] * np.clip(np.nan_to_num(x), 0, None))
+        test = ok.sum(axis=0) >= CLIP_MIN
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            centre = np.nanmedian(x, axis=0)
+            for it in range(2):
+                tol = CLIP_AMP * np.abs(centre)
+                hi = ok & ((x > centre + CLIP_HI * S + tol))
+                near = ok & (x > centre + CLIP_NEAR * S + tol)
+                nb = np.zeros_like(near)
+                nb[1:] |= near[:-1]
+                nb[:-1] |= near[1:]
+                bad = test & (hi & ~nb | ok & (x < centre - CLIP_LO * S - tol))
+                if GROW:
+                    for i in range(n):
+                        if bad[i].any():
+                            bad[i] = binary_dilation(bad[i], iterations=GROW) & ok[i]
+                keep = ok & ~bad
+                if it == 0:
+                    wk = np.where(keep, w, 0)
+                    ws = wk.sum(axis=0)
+                    centre = np.where(ws > 0, np.nansum(np.where(keep, x, 0) * wk, axis=0) / np.maximum(ws, 1e-30),
+                                      centre)
+    out = np.zeros((len(groups),) + X.shape[1:], np.float32)
+    for j, g in enumerate(groups):
+        okg, kg_ = ok[g], keep[g]
+        kg_ = np.where(((okg.sum(axis=0) > 0) & (kg_.sum(axis=0) == 0))[None], okg, kg_)
+        wg = w[g]
+        wk = np.where(kg_, wg, 0)
+        wa = np.where(okg, wg, 0)
+        ws, wsa = wk.sum(axis=0), wa.sum(axis=0)
+        num = np.nansum(np.where(kg_, x[g], 0) * wk, axis=0)
+        sky = np.nansum(np.where(okg, Sk[g], 0) * wa, axis=0)
+        out[j] = np.where(ws > 0, num / np.maximum(ws, 1e-30) + sky / np.maximum(wsa, 1e-30), 0)
+    cov = np.where(ok, w, 0).sum(axis=0)
+    return out, cov, (ok & ~keep).sum(axis=0).astype(np.int16)
+
+
 def bin_header(skel, frames, k, first_hdr):
     hdr = skel.copy()
     for key in ('NAXIS', 'NAXIS1', 'NAXIS2'):
@@ -175,6 +250,8 @@ def main():
     ap.add_argument('-I', '--noiraf', action='store_true', help='phcat -I (SExtractor magnitudes, faster)')
     ap.add_argument('-E', '--engine', choices=('numpy', 'iraf', 'auto'), default='numpy',
                     help='phcat aperture photometry: numpy (IRAF phot reimplemented, fast; default) or IRAF')
+    ap.add_argument('--stack', choices=('clip', 'mean'), default='clip',
+                    help='clip: weighted mean with outlier rejection (default); mean: plain weighted mean')
     ap.add_argument('-k', '--keep', action='store_true', help='keep the work files')
     ap.add_argument('-v', '--verbose', action='store_true')
     args = ap.parse_args()
@@ -227,27 +304,25 @@ def main():
     shape = (skel['NAXIS2'], skel['NAXIS1'])
     zref = frames[0].zp
 
-    # every frame resampled once and added to its bin and to the deep image, then dropped:
-    # memory 2 x (12 + 1) grids, not one per frame (12 s SBT frames are 4k x 4k)
-    acc = np.zeros((args.points + 1,) + shape, np.float32)
-    cnt = np.zeros((args.points + 1,) + shape, np.uint16)
-    lock = threading.Lock()
+    # every frame resampled once (flux on the first frame's zeropoint) into a disk-backed
+    # cube; then, strip by strip, the outlier rejection over all the frames and the
+    # exposure-weighted means of the bins and the deep image (stack_strip)
+    n_all = len(frames)
+    cube = np.lib.format.open_memmap(f"{work}/cube.npy", mode='w+', dtype=np.float32, shape=(n_all,) + shape)
+    skies = [None] * n_all
 
     def add(i_f):
         i, f = i_f
         rs = Resampler(f.wcs, f"{work}/skel.hdr")
-        img = rs(f.data()) * 10 ** (0.4 * (zref - f.zp))
+        k_i = 10 ** (0.4 * (zref - f.zp))
+        img = rs(f.data()) * k_i
         ny, nx = f.shape
         cov = (rs.x >= 0) & (rs.x <= nx - 1) & (rs.y >= 0) & (rs.y <= ny - 1)
-        img[~cov] = 0
-        b, w = bin_of[i], wts[i]
-        # exposure-weighted: a 60 s frame counts three times a 20 s one (both on the
-        # first frame's flux scale already, through the zeropoints)
-        with lock:
-            acc[b] += img * w
-            cnt[b] += cov * np.uint16(w)
-            acc[-1] += img * w
-            cnt[-1] += cov * np.uint16(w)
+        img[~cov] = np.nan
+        med, rms = _sky(img)
+        gain = float(f.hdr.get('GAIN') or 1.0)
+        skies[i] = (med, rms, k_i / gain)   # var of x: rms^2 + (k/gain) (x - sky)
+        cube[i] = img
 
     # a pixel map takes ~60 B/px while it is built: 1k frames in parallel, 4k ones (~1 GB
     # each) two at a time
@@ -255,32 +330,62 @@ def main():
     workers = max(1, min(args.jobs, int(RESAMPLE_MEM // (60 * npix))))
     with cf.ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(add, enumerate(frames)))
+    cube.flush()
     log.info(f"{n} frames resampled onto {shape[1]}x{shape[0]} in {time.time() - t:.1f}s "
              f"(zeropoints {min(f.zp for f in frames):.2f}..{max(f.zp for f in frames):.2f})")
 
-    def mean_of(j, scale):
-        c = cnt[j]
-        return np.where(c > 0, acc[j] / np.maximum(c, 1) * scale, 0).astype(np.float32), c
+    groups = [list(m) for m in members] + [list(range(n_all))]
+    out = np.zeros((len(groups),) + shape, np.float32)
+    cnt = np.zeros(shape, np.float32)
+    nrej = np.zeros(shape, np.int16)
+    rows = max(8, int(STACK_MEM // (n_all * shape[1] * 4 * 6)))
+    clip = args.stack == 'clip'
+    for y0 in range(0, shape[0], rows):
+        y1 = min(shape[0], y0 + rows)
+        ya, yb = max(0, y0 - GROW), min(shape[0], y1 + GROW)
+        X = np.asarray(cube[:, ya:yb, :])
+        Sk = np.stack([_sky_at(skies[i][0], MESH, ya, yb, 0, shape[1]) for i in range(n_all)])
+        r = slice(y0 - ya, y0 - ya + (y1 - y0))
+        o, c, nr = stack_strip(X, Sk, [s[1] for s in skies], [s[2] for s in skies], wts, groups, clip)
+        out[:, y0:y1] = o[:, r]
+        cnt[y0:y1] = c[r]
+        nrej[y0:y1] = nr[r]
+    del cube
+    os.unlink(f"{work}/cube.npy")
+    log.info(f"stack ({args.stack}): {int(nrej.sum())} frame pixels rejected "
+             f"({nrej.sum() / max(1, n_all * nrej.size) * 1e6:.0f} ppm), {np.mean(nrej > 0) * 100:.2f}% of the grid touched")
 
     # the weighted mean times the summed exposure in units of the first frame's: a bin has
     # the signal of its whole exposure (equal exposures: the mean times k, as before)
+    def stack_keys(h):
+        h['STACK'] = (args.stack, 'framestep: clip = weighted mean with outlier rejection')
+        if clip:
+            h['CLIPHI'] = (CLIP_HI, 'rejection above the median [sigma]')
+            h['CLIPLO'] = (CLIP_LO, 'rejection below the median [sigma]')
+            h['CLIPAMP'] = (CLIP_AMP, 'tolerance as a fraction of the median')
+        return h
+
     bins = []
     for b, m in enumerate(members):
         fr = [frames[i] for i in m]
-        img, _ = mean_of(b, sum(f.exptime for f in fr) / exp0)
+        img = out[b] * (sum(f.exptime for f in fr) / exp0)
         ts = fr[0].t0
         name = (time.strftime('%Y%m%d%H%M%S', time.gmtime(ts)) + f"-{int((ts % 1) * 1000):03d}"
                 + f"-{fr[0].hdr.get('FILTER', 'UNK')}-f{m[0]:03d}b{len(m)}")
-        fits.PrimaryHDU(data=img, header=bin_header(skel, fr, len(fr), fr[0].hdr)).writeto(f"{work}/{name}.fits",
-                                                                                         overwrite=True)
+        fits.PrimaryHDU(data=img, header=stack_keys(bin_header(skel, fr, len(fr), fr[0].hdr))).writeto(
+            f"{work}/{name}.fits", overwrite=True)
         bins.append(name)
 
-    deep, cnt = mean_of(-1, sum(f.exptime for f in frames) / exp0)
+    deep = out[-1] * (sum(f.exptime for f in frames) / exp0)
     cnt = cnt / max(1, min(wts))   # coverage in frames of the shortest exposure
-    hdr = bin_header(skel, frames, n, frames[0].hdr)
+    hdr = stack_keys(bin_header(skel, frames, n, frames[0].hdr))
     hdr['KINSTEP'] = (k, 'frames per bin of this step')
+    if clip:
+        hdr['NCLIPPED'] = (int(nrej.sum()), 'frame pixels rejected')
     fits.PrimaryHDU(data=deep, header=hdr).writeto(f"{work}/deep.fits", overwrite=True)
-    del acc
+    if args.keep:
+        fits.PrimaryHDU(data=nrej, header=hdr).writeto(f"{work}/rejected.fits", overwrite=True)
+    del out
     log.info(f"{len(bins)} bins and the deep image in {time.time() - t:.1f}s "
              f"(coverage {int(cnt.max())} frame-weights, {np.mean(cnt >= cnt.max() / 2) * 100:.0f}% of the grid by half or more)")
 

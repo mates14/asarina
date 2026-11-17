@@ -50,7 +50,8 @@ TELEGRAM_CONFIG = os.environ.get('TRIGREPORT_TELEGRAM_CONFIG', '~/gcn/config.jso
 TELEGRAM_CHAT = os.environ.get('TRIGREPORT_TELEGRAM_CHAT', 'private_chat_id')   # key in config.json 'telegram'
 ERRATIC_ZVAR = 10.0     # an ERRATIC source inside the box this significant and
 ERRATIC_MARGIN = 2.0    # [mag] this far above the limit is 'likely'
-SCHEMA = 3          # report.json layout (2: fit, error parts, points, conditions, ids; 3: fit chi2_ndf, moon_illum/alt, repeatability floor)
+SCHEMA = 4          # report.json layout (2: fit, error parts, points, conditions, ids; 3: fit chi2_ndf, moon_illum/alt, repeatability floor;
+                    # 4: candidates' lightcurve_steps, limits_steps)
 N_CAND = 5          # candidates in the record
 N_PLOT = 3          # of them in the light-curve plot
 MATCH = 1.5         # [arcsec] a candidate in a bin catalogue
@@ -228,10 +229,11 @@ def build(obs):
     out = os.path.join(obs, 'report')
     os.makedirs(out, exist_ok=True)
 
-    step_info = []
+    step_info, bins_steps = [], []
     for s in steps:
         sj = json.load(open(os.path.join(s, 'step.json')))
         bt = [Table.read(b, format='ascii.ecsv') for b in _bins(s)]
+        bins_steps.append((sj['step'], bt))
         tt = [(t.meta['JD'] - t0) * 86400 for t in bt]
         step_info.append(dict(step=sj['step'], bins=sj.get('bins_ok'), bin_seconds=sj.get('bin_seconds'),
                               deep_limit=_f(sj.get('deep_limit'), 2), seconds=sj.get('seconds'),
@@ -240,7 +242,7 @@ def build(obs):
                               exposure_bin_s=_f(np.median([t.meta.get('EXPTIME', np.nan) for t in bt]), 2),
                               exposure_total_s=_f(np.nansum([t.meta.get('EXPTIME', np.nan) for t in bt]), 1),
                               **_conditions(bt)))
-    bins_last = [Table.read(b, format='ascii.ecsv') for b in _bins(last)]
+    bins_last = bins_steps[-1][1]
 
     cands = []
     agf = os.path.join(last, 'afterglow.ecsv')
@@ -291,6 +293,9 @@ def build(obs):
         c['id'] = _key(c)     # rounded position: the same for the same source in every step and telescope
         c['lightcurve'] = _lightcurve(bins_last, c['ra'], c['dec'], t0)
         c['points'] = _points(bins_last, c['ra'], c['dec'], t0, frames)
+        # every step's light curve: an early step often shows what the last one has averaged
+        # away (or a hot pixel's early points, where the last one shows a steady star)
+        c['lightcurve_steps'] = [[k, _lightcurve(bt, c['ra'], c['dec'], t0)] for k, bt in bins_steps]
     best = cands[0] if cands and not (wide and not _variable(cands[0])) else None
     status = 'nothing' if best is None else ('candidate' if best['cls'] in ('NEW', 'ERRATIC', 'SPIKE', 'FLARE?') else 'likely')
     if best is not None and best['cls'] == 'ERRATIC' and (best.get('dist_box') or 99) <= 1 and \
@@ -321,7 +326,8 @@ def build(obs):
                         if trig is not None else None),
                step=step_info[-1]['step'], steps=step_info, status=status, best=best, candidates=cands,
                wide=wide,
-               limits=_limits(bins_last, t0))
+               limits=_limits(bins_last, t0),
+               limits_steps=[[k, _limits(bt, t0)] for k, bt in bins_steps])
     with open(os.path.join(out, 'report.json.tmp'), 'w') as f:
         json.dump(rec, f, indent=1)
     os.replace(os.path.join(out, 'report.json.tmp'), os.path.join(out, 'report.json'))
@@ -340,62 +346,92 @@ def build(obs):
 
 # ---------------------------------------------------------------- products
 
+STEP_MARKERS = ['o', 's', '^', 'D', 'v', 'P', 'X', 'h', '<', '>', 'p', '*']
+
+
 def plot_lc(rec, stepdir, path):
+    """The best candidates' light curves from every step (marker = step, colour = candidate; the
+    last step filled, the earlier ones open) on a logarithmic time axis, the bins' limits, the
+    extrapolation."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(8, 5))
+    from matplotlib.lines import Line2D
+    fig, ax = plt.subplots(figsize=(9, 5.5))
     colours = ['#d62728', '#1f77b4', '#2ca02c']
-    # the magnitude range follows the best candidate (its points, its quiescence, its extrapolation);
-    # other candidates and the bins' limits are drawn only where they fall into it, so that faint
-    # candidates or deep limits do not squash the evolution of the best one
-    window, times = None, []
+    steps = [k for k, _ in rec.get('limits_steps') or []] or [rec['step']]
+    mk = {k: STEP_MARKERS[i % len(STEP_MARKERS)] for i, k in enumerate(steps)}
+    last = steps[-1]
+
+    def arr(lc):
+        return np.array([x for x in lc if x[2] is not None and x[1] is not None and x[0] > 0], dtype=float).reshape(-1, 3)
+
+    # the magnitude range follows the best candidate (all its steps' points, its quiescence, its
+    # extrapolation); other candidates and the limits are drawn only where they fall into it
+    window, times, cand_handles = None, [], []
     for i, (c, col) in enumerate(zip(rec['candidates'][:N_PLOT], colours)):
-        lc = np.array([x for x in c['lightcurve'] if x[2] is not None and x[0] > 0], dtype=float)
-        if len(lc) == 0:
+        per_step = [(k, arr(lc)) for k, lc in (c.get('lightcurve_steps') or [[last, c['lightcurve']]])]
+        per_step = [(k, lc) for k, lc in per_step if len(lc)]
+        if not per_step:
             continue
+        allp = np.vstack([lc for _, lc in per_step])
         ex = []
         if c['kind'] == 'afterglow' and c['cls'] != 'NEW':
-            ex = [(lc[-1, 0] + 60 * int(k), v[0], v[1]) for k, v in c['extrap'].items() if v[0] is not None]
+            lcl = arr(c['lightcurve'])
+            if len(lcl):
+                ex = [(lcl[-1, 0] + 60 * int(k), v[0], v[1]) for k, v in c['extrap'].items() if v[0] is not None]
         quiet = c.get('catmag') if c['kind'] == 'flare' else None
         label = f"{c['cls']} {c['ra']:.5f} {c['dec']:+.5f}"
         if window is None:
-            ys = list(lc[:, 1] - lc[:, 2]) + list(lc[:, 1] + lc[:, 2]) + [e[1] for e in ex]
+            good = allp[allp[:, 2] < 1.0] if np.any(allp[:, 2] < 1.0) else allp
+            ys = list(good[:, 1] - good[:, 2]) + list(good[:, 1] + good[:, 2]) + [e[1] for e in ex]
             if quiet is not None:
                 ys.append(quiet)
             lo, hi = min(ys), max(ys)
             pad = max(0.1, 0.1 * (hi - lo), (0.4 - (hi - lo)) / 2)
             window = (lo - pad, hi + pad)
-        elif not (window[0] <= np.median(lc[:, 1]) <= window[1]):
-            ax.plot([], [], 'o', ms=4, color=col, alpha=0.4,
-                    label=f"{label} (off scale, {np.median(lc[:, 1]):.1f})")
+        elif not (window[0] <= np.median(allp[:, 1]) <= window[1]):
+            cand_handles.append(Line2D([], [], ls='none', marker='o', ms=5, color=col, alpha=0.4,
+                                       label=f"{label} (off scale, {np.median(allp[:, 1]):.1f})"))
             continue
-        ax.errorbar(lc[:, 0], lc[:, 1], yerr=lc[:, 2], fmt='o', ms=4, color=col, capsize=0, label=label)
-        times += list(lc[:, 0])
+        cand_handles.append(Line2D([], [], ls='-', lw=6, color=col, label=label))
+        for k, lc in per_step:
+            filled = k == last
+            ax.errorbar(lc[:, 0], lc[:, 1], yerr=lc[:, 2], fmt=mk.get(k, 'o'), ms=5 if filled else 4.5,
+                        color=col, mfc=col if filled else 'none', alpha=1.0 if filled else 0.7,
+                        elinewidth=1 if filled else 0.7, capsize=0, zorder=3 if filled else 2)
+            times += list(lc[:, 0])
         if quiet is not None:
-            ax.axhline(quiet, ls='--', lw=1, color=col, alpha=0.7, label=f"quiescence (catalogue) {quiet:.2f}")
+            ax.axhline(quiet, ls='--', lw=1, color=col, alpha=0.7)
+            cand_handles.append(Line2D([], [], ls='--', lw=1, color=col, label=f"quiescence (catalogue) {quiet:.2f}"))
         if len(ex):
             ex = np.array(ex, dtype=float)
             times += list(ex[:, 0])
-            ax.errorbar(ex[:, 0], ex[:, 1], yerr=ex[:, 2], fmt='s', mfc='none', color=col, alpha=0.6,
-                        capsize=3)
-    lim = np.array([x for x in rec['limits'] if x[0] > 0 and x[1] is not None], dtype=float)
-    if window is not None and len(lim):
-        lim = lim[lim[:, 1] <= window[1]]
-    if len(lim):
-        ax.plot(lim[:, 0], lim[:, 1], 'v', color='grey', ms=4, alpha=0.6, label='bin limit')
-        times += list(lim[:, 0])
+            ax.errorbar(ex[:, 0], ex[:, 1], yerr=ex[:, 2], fmt='_', ms=10, color=col, alpha=0.6, capsize=3)
+    for k, lim in (rec.get('limits_steps') or [[last, rec['limits']]]):
+        lim = np.array([x for x in lim if x[0] > 0 and x[1] is not None], dtype=float).reshape(-1, 2)
+        if window is not None and len(lim):
+            lim = lim[lim[:, 1] <= window[1]]
+        if len(lim):
+            ax.plot(lim[:, 0], lim[:, 1], 'v', color='grey', ms=4 if k == last else 3,
+                    alpha=0.6 if k == last else 0.25, zorder=1)
+            times += list(lim[:, 0])
     if window is not None:
         ax.set_ylim(window[0], window[1])
-    if times and max(times) > 10 * min(times):   # a log time axis only where it spans a decade
+    if times and min(times) > 0:
         ax.set_xscale('log')
     ax.invert_yaxis()
     ax.set_xlabel('time since trigger [s]' if rec['trigger'] else 'time since the first frame [s]')
     ax.set_ylabel(f"magnitude ({rec['filter']}, calibrated to r)" if rec['filter'] in ('N', 'clear') else 'magnitude')
     t = rec['trigger']['name'] if rec['trigger'] else rec['object']
-    ax.set_title(f"{rec['site']} {t}, step {rec['step']}")
-    ax.grid(alpha=0.3)
-    ax.legend(fontsize=8, loc='best')
+    ax.set_title(f"{rec['site']} {t}, steps {steps[0]}..{last}" if len(steps) > 1 else f"{rec['site']} {t}, step {last}")
+    ax.grid(alpha=0.3, which='both')
+    bsec = {s['step']: s.get('exposure_bin_s') for s in rec.get('steps', [])}
+    step_handles = [Line2D([], [], ls='none', marker=mk[k], color='k', mfc='k' if k == last else 'none', ms=5,
+                           label=f"step {k}" + (f" ({bsec[k]:g} s bins)" if bsec.get(k) else ''))
+                    for k in steps]
+    step_handles.append(Line2D([], [], ls='none', marker='v', color='grey', ms=4, label='bin limit'))
+    ax.legend(handles=cand_handles + step_handles, fontsize=7.5, loc='center left', bbox_to_anchor=(1.01, 0.5))
     fig.tight_layout()
     fig.savefig(path, dpi=90)
     plt.close(fig)
