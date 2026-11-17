@@ -187,7 +187,7 @@ def raw_ready(job):
 # ---------------------------------------------------------------- steps
 
 def due_frame_step(series, state):
-    """Frames: (step number, frames used, points) of the step to run now, or None.
+    """Frames: (step number, first frame, end frame, points) of the step to run now, or None.
     The longest prefix past the last step's that splits into POINTS bins of equal summed
     exposure (equal exposures: 12, 24, 36, ... frames; 12 x 20 s + 8 x 60 s splits too),
     at most MAX_FRAME_STEP x POINTS frames.  Before the first such step, frames of
@@ -196,12 +196,24 @@ def due_frame_step(series, state):
     done = state.get('done', []) + state.get('failed', [])
     last_n = state.get('last_n', 0)
     exps = [j.get('exptime', 0.0) for j in series]
-    for n in range(min(len(series), MAX_FRAME_STEP * POINTS), last_n, -1):
-        if exposure_bins(exps[:n], POINTS) is not None:
-            return max(done, default=0) + 1, n, POINTS
-    if not done and exps and exps[0] >= EARLY_EXPTIME and len(series) >= EARLY_FRAMES \
-            and exposure_bins(exps[:EARLY_FRAMES], EARLY_FRAMES) is not None:
-        return 0, EARLY_FRAMES, EARLY_FRAMES
+    # the start: the first frame, or - when a leading block of other exposures can never
+    # split evenly with what follows (5 x 20 s, then 60 s) - the start of the last run of
+    # one exposure time; once a step has started somewhere, stay there
+    starts = [state['first']] if 'first' in state else [0]
+    if 'first' not in state and exps:
+        tail = len(exps) - 1
+        while tail > 0 and exps[tail - 1] == exps[-1]:
+            tail -= 1
+        if tail > 0:
+            starts.append(tail)
+    for s0 in starts:
+        for n in range(min(len(series), s0 + MAX_FRAME_STEP * POINTS), max(last_n, s0), -1):
+            if exposure_bins(exps[s0:n], POINTS) is not None:
+                return max(done, default=0) + 1, s0, n, POINTS
+    for s0 in starts:
+        if not done and len(exps) > s0 and exps[s0] >= EARLY_EXPTIME and len(series) >= s0 + EARLY_FRAMES \
+                and exposure_bins(exps[s0:s0 + EARLY_FRAMES], EARLY_FRAMES) is not None:
+            return 0, s0, s0 + EARLY_FRAMES, EARLY_FRAMES
     return None
 
 
@@ -216,7 +228,7 @@ def due_step(nseries, state, kind='kinetic'):
     return k
 
 
-def run_step(obs, series, k, args, state=None, spath=None, nframes=None, points=POINTS):
+def run_step(obs, series, k, args, state=None, spath=None, nframes=None, points=POINTS, first=0):
     """kinstep on the first k series of the observation (framestep on its first 12k
     frames); True if it produced bins.  While it runs, the previous step's search results
     are reported as soon as they appear (state, spath: the observation's state), so that
@@ -226,7 +238,7 @@ def run_step(obs, series, k, args, state=None, spath=None, nframes=None, points=
         shutil.rmtree(out)
     os.makedirs(out)
     if series[0].get('kind') == 'frame':
-        use = series[:nframes]
+        use = series[first:nframes]
         cmd = [sys.executable, '-m', 'asarina.pipeline.framestep', '--points', str(points), '--label', str(k),
                '-j', str(args.jobs), '-o', out] + [f"{j['fits']}:{j['ecsv']}" for j in use]
         cams = '+'.join(sorted(set(str(j['ccd']) for j in use)))
@@ -356,19 +368,20 @@ def serve(root, args):
             due = due_frame_step(series, state)
             if due is None:
                 continue
-            k, nframes, points = due
-            need = series[:nframes]
+            k, first, nframes, points = due
+            need = series[first:nframes]
         else:
             k = due_step(len(series), state, series[0].get('kind', 'kinetic') if series else 'kinetic')
             if k is None:
                 continue
-            nframes, points, need = None, POINTS, series[:k]
+            first, nframes, points, need = 0, None, POINTS, series[:k]
         waiting = [j['stem'] for j in need if not raw_ready(j)]
         if waiting and now - max(j['queued'] for j in need) < RAW_WAIT:
             continue  # RTS2 still archiving the raw frame
-        ok = run_step(obs, series, k, args, state, spath, nframes=nframes, points=points)
+        ok = run_step(obs, series, k, args, state, spath, nframes=nframes, points=points, first=first)
         state.setdefault('done' if ok else 'failed', []).append(k)
         if nframes:
+            state['first'] = first
             state['last_n'] = nframes
             state.setdefault('step_frames', {})[str(k)] = nframes
         _save(spath, state)
