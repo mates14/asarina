@@ -31,7 +31,7 @@ class PhotometryPipeline:
     def __init__(self,
                  phdb_root: str = "~/phdb",
                  png_root: str = "~/png",
-                 calib_root: str = "/home/mates/calib",
+                 calib_root: str = None,   # None: $ASARINA_CALIB_ROOT or ~/calib (ImageProcessor)
                  calib_dir_template: str = "/home/mates/flat{year}/",
                  # Alternative dark calibration
                  smart_dark_calib: str = None,
