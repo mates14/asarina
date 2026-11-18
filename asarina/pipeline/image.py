@@ -55,7 +55,9 @@ class ImageProcessor:
         self.exposure_tolerance = exposure_tolerance
         self.calib_dir_template = calib_dir_template
         self.max_year_search = max_year_search
-        self.calib_root = Path(calib_root) if calib_root else Path.home() / 'calib'
+        # ASARINA_CALIB_ROOT: another master-frame tree for a whole run (archive replays
+        # with per-epoch masters) without touching ~/calib
+        self.calib_root = Path(calib_root or os.environ.get('ASARINA_CALIB_ROOT') or Path.home() / 'calib')
         self.sip = sip
         self.passes = passes
         self.dophot_model = dophot_model
