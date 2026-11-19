@@ -478,7 +478,8 @@ def plot_chart(rec, stepdir, path):
     v = cut[np.isfinite(cut) & (cut != 0)]
     lo, hi = (np.percentile(v, 5), np.percentile(v, 99.5)) if len(v) else (0, 1)
     fig, ax = plt.subplots(figsize=(5, 5))
-    ax.imshow(cut, origin='lower', cmap='gray_r', vmin=lo, vmax=hi, extent=(x0, x1, y0, y1))
+    ax.imshow(cut, origin='lower', cmap='gray_r', vmin=lo, vmax=hi,
+              extent=(x0 - 0.5, x1 - 0.5, y0 - 0.5, y1 - 0.5))   # pixel centres on the integers, as world2pix(.., 0)
     for c, col in zip(rec['candidates'][:N_PLOT], ('#d62728', '#1f77b4', '#2ca02c')):
         cx, cy = w.all_world2pix([[c['ra'], c['dec']]], 0)[0]
         ax.add_patch(plt.Circle((cx, cy), 8 / scale * 2, fill=False, color=col, lw=1.5))
