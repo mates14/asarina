@@ -56,6 +56,11 @@ N_CAND = 5          # candidates in the record
 N_PLOT = 3          # of them in the light-curve plot
 MATCH = 1.5         # [arcsec] a candidate in a bin catalogue
 CHART = 4.0         # [arcmin] finding chart size
+KNOWN = os.environ.get('TRIGREPORT_KNOWN', '1') != '0'   # look the candidates up in Gaia / PS1 / LS-DR10
+KNOWN_R = 4.0       # [arcsec] known objects summed within this of a candidate (a blended pair)
+KNOWN_DMAG = 1.5    # [mag] a steady candidate this close to the known objects' flux is them
+CUT = 1.5           # [arcmin] candidate cutout side
+CUT_FRAMES = 6      # single frames shown next to the deep cutout
 NEAR_BOX = 3.0      # [error-box radii] or
 NEAR_ARCMIN = 0.5   # [arcmin] "near the trigger" for the order of the candidates
 WIDE_BOX_ARCMIN = 30.0   # [arcmin] error-box radius above which (Fermi GBM) only a source that
@@ -210,6 +215,146 @@ def _f(x, nd=3):
 
 # ---------------------------------------------------------------- build
 
+def _known(cands, obs, stepdir):
+    """Mark the steady candidates that are known objects the comparison catalogue (ATLAS-RefCat2:
+    stars only) lacks - galaxies above all (GRB 190919A: three steady 'NEW' R ~ 17 objects 5-10
+    box radii out, all Legacy Survey DR10 galaxies).  pyrt.core.deepfield.known_sources (Gaia DR3,
+    Pan-STARRS or LS-DR10, ATLAS) for the whole field, cached in <obs>/known.ecsv; a candidate is
+    'known' when the brightest source's objects within KNOWN_R sum to within KNOWN_DMAG of it.
+    Only steady ones: a variable light curve on a known object stays a candidate."""
+    if not KNOWN or not cands:
+        return
+    try:
+        from astropy.io import fits
+        from astropy.wcs import WCS
+        from pyrt.core.deepfield import known_sources
+        h = fits.getheader(os.path.join(stepdir, 'deep.fits'))
+        w = WCS(h)
+        ny, nx = h['NAXIS2'], h['NAXIS1']
+        ra0, de0 = w.all_pix2world([[nx / 2, ny / 2]], 0)[0]
+        corners = w.all_pix2world([[0, 0], [nx, 0], [0, ny], [nx, ny]], 0)
+        rad = max(np.hypot(((c[0] - ra0 + 180) % 360 - 180) * np.cos(np.radians(de0)), c[1] - de0)
+                  for c in corners) + 0.01
+        t = known_sources(float(ra0), float(de0), float(rad), cache=os.path.join(obs, 'known.ecsv'))
+    except Exception as e:
+        print(f"trigreport: no known-object check ({e})", file=sys.stderr)
+        return
+    if t is None or not len(t):
+        return
+    kra, kde = np.asarray(t['RA'], float), np.asarray(t['DEC'], float)
+    kmag, ksrc = np.asarray(t['MAG'], float), np.array([str(x) for x in t['SRC']])
+    for c in cands:
+        if _variable(c) or c.get('mag_mean') is None:
+            continue
+        d = np.hypot((kra - c['ra']) * np.cos(np.radians(c['dec'])), kde - c['dec']) * 3600
+        best = None
+        for src in set(ksrc[d < KNOWN_R]):
+            m = (d < KNOWN_R) & (ksrc == src) & np.isfinite(kmag)
+            if m.any():
+                tot = -2.5 * np.log10(np.sum(10 ** (-0.4 * kmag[m])))
+                if best is None or tot < best[1]:
+                    best = (src, tot, float(d[m].min()))
+        if best is not None and best[1] - c['mag_mean'] <= KNOWN_DMAG:
+            c['known'] = dict(src=best[0], mag=_f(best[1], 2), dist_arcsec=_f(best[2], 1))
+
+
+def _defects(cands, obs, stepdir):
+    """Mark the candidates that stay on the chip, not on the sky: pyrt.core.deepfield.chip_or_sky
+    on the step's frames (the deep search's DEFECT test).  A hot pixel the dark left survives the
+    bins' clipped stacks while the pointing holds (FRAM shifts it every 3 frames) and looks like a
+    source in the deep image too (GRB 190919A N: two sharp NEW 17.1-17.4 a few pixels in size,
+    the deep search's "5 staying on the chip")."""
+    if not cands:
+        return
+    try:
+        from pyrt.core.deepfield import chip_or_sky, CHIP_Z, CHIP_DRIFT
+        sj = json.load(open(os.path.join(stepdir, 'step.json')))
+        fr = [p for p in (os.path.join(obs, 'frames', n + '.fits') for n in sj.get('frames', [])) if os.path.exists(p)]
+        ra = np.array([c['ra'] for c in cands], float)
+        de = np.array([c['dec'] for c in cands], float)
+        z, drift, _, _ = chip_or_sky(fr, ra, de, np.ones(len(fr)))
+    except Exception as e:
+        print(f"trigreport: no chip-or-sky test ({e})", file=sys.stderr)
+        return
+    for c, zz in zip(cands, z):
+        if np.isfinite(zz):
+            c['chip_z'] = _f(zz, 1)
+            if drift >= CHIP_DRIFT and zz < -CHIP_Z:
+                c['defect'] = dict(chip_z=_f(zz, 1), drift_px=_f(drift, 1))
+
+
+def _cut(img, x, y, r):
+    """(2r+1)^2 cutout centred on the pixel nearest (x, y), NaN outside the image."""
+    ix, iy = int(round(x)), int(round(y))
+    out = np.full((2 * r + 1, 2 * r + 1), np.nan)
+    ny, nx = img.shape
+    x0, x1, y0, y1 = max(0, ix - r), min(nx, ix + r + 1), max(0, iy - r), min(ny, iy + r + 1)
+    if x0 < x1 and y0 < y1:
+        out[y0 - iy + r:y1 - iy + r, x0 - ix + r:x1 - ix + r] = img[y0:y1, x0:x1]
+    return out, x - ix, y - iy
+
+
+def plot_cutouts(items, deep, frames, path, t0=None, size=CUT, nframes=CUT_FRAMES):
+    """One row per (label, ra, dec): the deep image and nframes single frames spread over the
+    step, size arcmin square, each scaled on its own.  A real source is in the deep cutout and
+    (bright enough) in the frames at the circle; a bad pixel sits off it or in only a few frames
+    (the pointing shifts every few frames), a blend or a galaxy shows its shape.  deep: FITS path;
+    frames: FITS paths (the step's, in time order); t0: JD for the frame labels."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    if not items:
+        return False
+    ims = []
+    for p in [deep] + [frames[i] for i in sorted(set(np.linspace(0, len(frames) - 1, min(nframes, len(frames)))
+                                                     .round().astype(int)))] if frames else [deep]:
+        if p is None or not os.path.exists(p):
+            continue
+        with fits.open(p) as h:
+            hd = h[0].header
+            jd = hd.get('JD')
+            lab = 'deep' if p == deep else (f"+{(jd - t0) * 86400:.0f} s" if t0 and jd else os.path.basename(p)[:14])
+            ims.append((lab, h[0].data.astype(float), WCS(hd)))
+    if not ims:
+        return False
+    nr, nc = len(items), len(ims)
+    fig, axs = plt.subplots(nr, nc, figsize=(1.35 * nc + 0.3, 1.45 * nr + 0.2), squeeze=False)
+    for i, (label, ra, dec) in enumerate(items):
+        for j, (lab, img, w) in enumerate(ims):
+            ax = axs[i, j]
+            ax.set_xticks([])
+            ax.set_yticks([])
+            scale = np.sqrt(abs(np.linalg.det(w.pixel_scale_matrix))) * 3600
+            r = max(5, int(size * 30 / scale))
+            x, y = w.all_world2pix([[ra, dec]], 0)[0]
+            cut, dx, dy = _cut(img, x, y, r)
+            v = cut[np.isfinite(cut) & (cut != 0)]
+            if len(v) > 10:
+                # the sky's noise sets the scale, the candidate's own peak its top (a bright
+                # neighbour saturates rather than washing a faint candidate out)
+                med = np.median(v)
+                sig = 1.4826 * np.median(np.abs(v - med)) or 1.0
+                ix, iy = int(round(dx)) + r, int(round(dy)) + r
+                pk = cut[max(0, iy - 2):iy + 3, max(0, ix - 2):ix + 3]
+                pk = np.nanmax(pk) if np.isfinite(pk).any() else med
+                lo, hi = med - 2 * sig, max(med + 6 * sig, pk)
+                ax.imshow(cut, origin='lower', cmap='gray_r', vmin=lo, vmax=max(hi, lo + 1e-6),
+                          extent=(-r - 0.5, r + 0.5, -r - 0.5, r + 0.5), interpolation='nearest')
+            ax.add_patch(plt.Circle((dx, dy), 8 / scale, fill=False, color='#d62728', lw=1))
+            ax.set_xlim(-r - 0.5, r + 0.5)
+            ax.set_ylim(-r - 0.5, r + 0.5)
+            if i == 0:
+                ax.set_title(lab, fontsize=7)
+            if j == 0:
+                ax.set_ylabel(label, fontsize=7)
+    fig.tight_layout(pad=0.3, w_pad=0.2, h_pad=0.3)
+    fig.savefig(path, dpi=90)
+    plt.close(fig)
+    return True
+
+
 def build(obs):
     from astropy.table import Table
     warnings.simplefilter('ignore')
@@ -287,7 +432,10 @@ def build(obs):
         db, da = c.get('dist_box'), c.get('dist_arcmin')
         return (db is None and da is None) or (db is not None and db <= NEAR_BOX) or (da is not None and da <= NEAR_ARCMIN)
     wide = trig is not None and trig['errorbox'] * 60 > WIDE_BOX_ARCMIN
-    cands.sort(key=lambda c: (wide and not _variable(c), not near(c), c['cls'] not in clear, -(c['score'] or 0)))
+    _known(cands, obs, last)
+    _defects(cands, obs, last)
+    cands.sort(key=lambda c: ('defect' in c or 'known' in c, wide and not _variable(c), not near(c), c['cls'] not in clear,
+                              -(c['score'] or 0)))
     cands = cands[:N_CAND]
     frames = _frames(last)
     for c in cands:
@@ -297,13 +445,17 @@ def build(obs):
         # every step's light curve: an early step often shows what the last one has averaged
         # away (or a hot pixel's early points, where the last one shows a steady star)
         c['lightcurve_steps'] = [[k, _lightcurve(bt, c['ra'], c['dec'], t0)] for k, bt in bins_steps]
-    best = cands[0] if cands and not (wide and not _variable(cands[0])) else None
+    best = cands[0] if cands and 'known' not in cands[0] and 'defect' not in cands[0] and not (wide and not _variable(cands[0])) else None
     status = 'nothing' if best is None else ('candidate' if best['cls'] in ('NEW', 'ERRATIC', 'SPIKE', 'FLARE?') else 'likely')
     if status == 'likely' and not near(best):
         # ordered, but far outside the error box: a variable star, not this trigger's
         # counterpart (FRAM LL 52007: TURNING 11' out of a 0.08' box; GRB 190919A: FADING
         # 13' out of 1.5', the afterglow itself NEW inside the box)
         status = 'candidate'
+    if status == 'candidate' and not near(best):
+        # nothing near the trigger: an unordered or steady source far outside the box is not
+        # its counterpart and must not steer the follow-up (still listed below)
+        status = 'nothing'
     if best is not None and best['cls'] == 'ERRATIC' and (best.get('dist_box') or 99) <= 1 and \
             (best.get('z_var') or 0) >= ERRATIC_ZVAR and (best.get('margin') or 0) >= ERRATIC_MARGIN:
         # inside the box, uncatalogued, bright and strongly variable without order: an afterglow
@@ -343,6 +495,20 @@ def build(obs):
             fn(rec, last, os.path.join(out, what))
         except Exception as e:
             print(f"trigreport: {what}: {e}", file=sys.stderr)
+    try:
+        sj = json.load(open(os.path.join(last, 'step.json')))
+        fr = [p for p in (os.path.join(obs, 'frames', n + '.fits') for n in sj.get('frames', [])) if os.path.exists(p)]
+        items = [(f"{i + 1} {c['cls']}{' known' if 'known' in c else ''}{' DEFECT' if 'defect' in c else ''} "
+                  f"{_mag(c):.1f}", c['ra'], c['dec'])
+                 for i, c in enumerate(rec['candidates'])]
+        if rec['trigger']:
+            items.insert(0, ('trigger', rec['trigger']['ra'], rec['trigger']['dec']))
+        cpath = os.path.join(out, 'cutouts.png')
+        rec['cutouts'] = plot_cutouts(items, os.path.join(last, 'deep.fits'), fr, cpath, t0=t0)
+        if not rec['cutouts'] and os.path.exists(cpath):
+            os.remove(cpath)
+    except Exception as e:
+        print(f"trigreport: cutouts.png: {e}", file=sys.stderr)
     with open(os.path.join(out, 'gcn.txt'), 'w') as f:
         f.write(gcn_text(rec))
     with open(os.path.join(out, 'index.html'), 'w') as f:
@@ -620,7 +786,12 @@ def page(rec):
         ex = ' '.join(f"+{k}': {v[0]:.2f}" + (f"±{v[1]:.2f}" if v[1] is not None else '')
                       for k, v in c.get('extrap', c.get('excess_extrap', {})).items() if v[0] is not None) if c['cls'] != 'NEW' else 'steady'
 
-        rows.append(f"<tr><td>{i + 1}</td><td>{e(c['cls'])}</td><td>{c['ra']:.5f} {c['dec']:+.5f}</td>"
+        kn = c.get('known')
+        cls = e(c['cls']) + (f"<br><span class=mut>known: {e(kn['src'])} {kn['mag']}, {kn['dist_arcsec']}\"</span>"
+                             if kn else '')
+        if c.get('defect'):
+            cls += f"<br><span class=mut>stays on the chip (z {c['defect']['chip_z']}): a pixel defect</span>"
+        rows.append(f"<tr><td>{i + 1}</td><td>{cls}</td><td>{c['ra']:.5f} {c['dec']:+.5f}</td>"
                     f"<td>{_mag(c):.2f}</td><td>{e(_trend(c))}</td>"
                     f"<td>{e(ex)}</td><td>{(str(c['dist_arcmin']) + chr(39)) if c.get('dist_arcmin') is not None else ''}</td>"
                     f"<td>{c['score']}</td></tr>")
@@ -646,9 +817,10 @@ pre {{ white-space:pre-wrap; border:1px solid var(--line); padding:8px; font-siz
 </style></head><body>
 <h1>{e(title)}</h1>
 <div class="mut">{e(rec['object'])} · {trig} · updated {e(rec['updated'])} UT · step {rec['step']}</div>
-<p class="status">{e({'nothing': 'Nothing new found.', 'candidate': 'Candidate(s), unconfirmed.', 'likely': 'Likely counterpart.'}[rec['status']])}</p>
+<p class="status">{e({'nothing': 'Nothing new near the trigger.' if rec['candidates'] else 'Nothing new found.', 'candidate': 'Candidate(s), unconfirmed.', 'likely': 'Likely counterpart.'}[rec['status']])}</p>
 <div class="imgs"><img src="lc.png" alt="light curve"><img src="chart.png" alt="finding chart"></div>
 <h2>Candidates</h2><div class="wrap"><table><tr><th>#</th><th>class</th><th>RA Dec (J2000)</th><th>mag</th><th>trend</th><th>expected</th><th>dist</th><th>S</th></tr>{''.join(rows) or '<tr><td colspan=8>none</td></tr>'}</table></div>
+{'<h2>Cutouts</h2><p class="mut">' + str(CUT) + "' square, the trigger position and every candidate: the deep image, then single frames across the step (each scaled on its own; north is roughly up).</p><div class=wrap><img src=cutouts.png alt=cutouts style='max-width:none'></div>" if rec.get('cutouts') else ''}
 <h2>Steps</h2><div class="wrap"><table><tr><th>step</th><th>bins</th><th>bin [s]</th><th>T-T0 [s]</th><th>bin limit</th><th>deep limit</th></tr>{srows}</table></div>
 <h2>Draft GCN</h2><pre>{e(gcn_text(rec))}</pre>
 <p class="mut"><a href="report.json">report.json</a> · asarina-kinseries / pyrt transients</p>
