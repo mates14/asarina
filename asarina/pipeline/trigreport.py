@@ -299,6 +299,11 @@ def build(obs):
         c['lightcurve_steps'] = [[k, _lightcurve(bt, c['ra'], c['dec'], t0)] for k, bt in bins_steps]
     best = cands[0] if cands and not (wide and not _variable(cands[0])) else None
     status = 'nothing' if best is None else ('candidate' if best['cls'] in ('NEW', 'ERRATIC', 'SPIKE', 'FLARE?') else 'likely')
+    if status == 'likely' and not near(best):
+        # ordered, but far outside the error box: a variable star, not this trigger's
+        # counterpart (FRAM LL 52007: TURNING 11' out of a 0.08' box; GRB 190919A: FADING
+        # 13' out of 1.5', the afterglow itself NEW inside the box)
+        status = 'candidate'
     if best is not None and best['cls'] == 'ERRATIC' and (best.get('dist_box') or 99) <= 1 and \
             (best.get('z_var') or 0) >= ERRATIC_ZVAR and (best.get('margin') or 0) >= ERRATIC_MARGIN:
         # inside the box, uncatalogued, bright and strongly variable without order: an afterglow
