@@ -59,6 +59,10 @@ CHART = 4.0         # [arcmin] finding chart size
 KNOWN = os.environ.get('TRIGREPORT_KNOWN', '1') != '0'   # look the candidates up in Gaia / PS1 / LS-DR10
 KNOWN_R = 4.0       # [arcsec] known objects summed within this of a candidate (a blended pair)
 KNOWN_DMAG = 1.5    # [mag] a steady candidate this close to the known objects' flux is them
+KNOWN_WAIT = 20.0   # [s] the report waits this long for the online query, then goes without it
+                    # (the query finishes in the background and caches for the next step)
+CHIP_MEM = 2e9      # [B] frames held for the chip-or-sky test (SBT 4k frames: ~14 of them)
+CHIP_FRAMES = 24    # at most this many, spread over the step
 CUT = 1.5           # [arcmin] candidate cutout side
 CUT_FRAMES = 6      # single frames shown next to the deep cutout
 NEAR_BOX = 3.0      # [error-box radii] or
@@ -235,7 +239,25 @@ def _known(cands, obs, stepdir):
         corners = w.all_pix2world([[0, 0], [nx, 0], [0, ny], [nx, ny]], 0)
         rad = max(np.hypot(((c[0] - ra0 + 180) % 360 - 180) * np.cos(np.radians(de0)), c[1] - de0)
                   for c in corners) + 0.01
-        t = known_sources(float(ra0), float(de0), float(rad), cache=os.path.join(obs, 'known.ecsv'))
+        # online (Gaia, Pan-STARRS / Legacy Survey): never hold the real-time report up for long
+        import threading
+        box = {}
+
+        def query():
+            try:
+                box['t'] = known_sources(float(ra0), float(de0), float(rad), cache=os.path.join(obs, 'known.ecsv'))
+            except Exception as e:
+                box['e'] = e
+        th = threading.Thread(target=query)
+        th.start()
+        th.join(KNOWN_WAIT)
+        if th.is_alive():
+            print(f"trigreport: known objects not in after {KNOWN_WAIT:.0f} s, this report goes without them",
+                  file=sys.stderr)
+            return
+        if 'e' in box:
+            raise box['e']
+        t = box.get('t')
     except Exception as e:
         print(f"trigreport: no known-object check ({e})", file=sys.stderr)
         return
@@ -267,9 +289,17 @@ def _defects(cands, obs, stepdir):
     if not cands:
         return
     try:
+        from astropy.io import fits
         from pyrt.core.deepfield import chip_or_sky, CHIP_Z, CHIP_DRIFT
         sj = json.load(open(os.path.join(stepdir, 'step.json')))
         fr = [p for p in (os.path.join(obs, 'frames', n + '.fits') for n in sj.get('frames', [])) if os.path.exists(p)]
+        if fr:
+            # chip_or_sky holds the frames whole (float64): a bounded, evenly spread subset
+            h = fits.getheader(fr[0])
+            nmax = min(CHIP_FRAMES, int(CHIP_MEM // (8 * h['NAXIS1'] * h['NAXIS2'])))
+            if nmax < 4:
+                return
+            fr = [fr[i] for i in sorted(set(np.linspace(0, len(fr) - 1, min(nmax, len(fr))).round().astype(int)))]
         ra = np.array([c['ra'] for c in cands], float)
         de = np.array([c['dec'] for c in cands], float)
         z, drift, _, _ = chip_or_sky(fr, ra, de, np.ones(len(fr)))
@@ -307,29 +337,37 @@ def plot_cutouts(items, deep, frames, path, t0=None, size=CUT, nframes=CUT_FRAME
     from astropy.wcs import WCS
     if not items:
         return False
-    ims = []
-    for p in [deep] + [frames[i] for i in sorted(set(np.linspace(0, len(frames) - 1, min(nframes, len(frames)))
-                                                     .round().astype(int)))] if frames else [deep]:
+    paths = [deep] + ([frames[i] for i in sorted(set(np.linspace(0, len(frames) - 1, min(nframes, len(frames)))
+                                                     .round().astype(int)))] if frames else [])
+    # one image at a time, only its cutouts kept (SBT 4k frames)
+    cols = []
+    for p in paths:
         if p is None or not os.path.exists(p):
             continue
-        with fits.open(p) as h:
+        with fits.open(p, memmap=True) as h:
             hd = h[0].header
             jd = hd.get('JD')
             lab = 'deep' if p == deep else (f"+{(jd - t0) * 86400:.0f} s" if t0 and jd else os.path.basename(p)[:14])
-            ims.append((lab, h[0].data.astype(float), WCS(hd)))
-    if not ims:
+            w = WCS(hd)
+            img = h[0].data
+            scale = np.sqrt(abs(np.linalg.det(w.pixel_scale_matrix))) * 3600
+            r = max(5, int(size * 30 / scale))
+            cuts = []
+            for _, ra, dec in items:
+                x, y = w.all_world2pix([[ra, dec]], 0)[0]
+                cuts.append(_cut(img, x, y, r))
+            cols.append((lab, scale, r, [(c.astype(float), dx, dy) for c, dx, dy in cuts]))
+            del img
+    if not cols:
         return False
-    nr, nc = len(items), len(ims)
+    nr, nc = len(items), len(cols)
     fig, axs = plt.subplots(nr, nc, figsize=(1.35 * nc + 0.3, 1.45 * nr + 0.2), squeeze=False)
     for i, (label, ra, dec) in enumerate(items):
-        for j, (lab, img, w) in enumerate(ims):
+        for j, (lab, scale, r, cuts) in enumerate(cols):
             ax = axs[i, j]
             ax.set_xticks([])
             ax.set_yticks([])
-            scale = np.sqrt(abs(np.linalg.det(w.pixel_scale_matrix))) * 3600
-            r = max(5, int(size * 30 / scale))
-            x, y = w.all_world2pix([[ra, dec]], 0)[0]
-            cut, dx, dy = _cut(img, x, y, r)
+            cut, dx, dy = cuts[i]
             v = cut[np.isfinite(cut) & (cut != 0)]
             if len(v) > 10:
                 # the sky's noise sets the scale, the candidate's own peak its top (a bright

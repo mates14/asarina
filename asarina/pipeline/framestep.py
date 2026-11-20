@@ -46,7 +46,6 @@ from astropy.table import Table
 from astropy.wcs import WCS
 
 from pyrt.core.stack import _sky, _sky_at, MESH
-from scipy.ndimage import binary_dilation
 
 from asarina.pipeline.kinphot import ref_wcs_and_response, fixed_terms, WCS_RE, STALE_TIME
 from asarina.pipeline.kinstep import (Resampler, copy_keys, mark_accumulated, photometry, merge_terms,
@@ -147,6 +146,29 @@ def exposure_bins(exptimes, points, tol=0.01):
     return bins if len(bins) == points and not cur else None
 
 
+def _nanmedian0(x, ok):
+    """np.nanmedian(x, axis=0) for a frame cube: a sort puts the NaNs last, the median is
+    taken from the finite ones (np.nanmedian goes through masked arrays here, ~5x slower)."""
+    xs = np.sort(x, axis=0)
+    c = ok.sum(axis=0)
+    lo = np.clip((c - 1) // 2, 0, None)[None]
+    hi = np.clip(c // 2, 0, x.shape[0] - 1)[None]
+    m = 0.5 * (np.take_along_axis(xs, lo, 0)[0] + np.take_along_axis(xs, hi, 0)[0])
+    return np.where(c > 0, m, np.nan).astype(x.dtype)
+
+
+def _grow(b, it):
+    """binary_dilation of every frame plane (the cross element, it iterations) by shifts."""
+    for _ in range(it):
+        g = b.copy()
+        g[:, 1:] |= b[:, :-1]
+        g[:, :-1] |= b[:, 1:]
+        g[:, :, 1:] |= b[:, :, :-1]
+        g[:, :, :-1] |= b[:, :, 1:]
+        b = g
+    return b
+
+
 def stack_strip(X, Sk, rms, kg, wts, groups, clip=True):
     """Rows of the frame cube X (frames x rows x cols, flux on the first frame's zeropoint, NaN
     off a frame) and their skies Sk -> the weighted means of the frame groups (the bins and
@@ -174,7 +196,7 @@ def stack_strip(X, Sk, rms, kg, wts, groups, clip=True):
         test = ok.sum(axis=0) >= CLIP_MIN
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            centre = np.nanmedian(x, axis=0)
+            centre = _nanmedian0(x, ok)
             for it in range(2):
                 tol = CLIP_AMP * np.abs(centre)
                 hi = ok & ((x > centre + CLIP_HI * S + tol))
@@ -184,9 +206,7 @@ def stack_strip(X, Sk, rms, kg, wts, groups, clip=True):
                 nb[:-1] |= near[1:]
                 bad = test & (hi & ~nb | ok & (x < centre - CLIP_LO * S - tol))
                 if GROW:
-                    for i in range(n):
-                        if bad[i].any():
-                            bad[i] = binary_dilation(bad[i], iterations=GROW) & ok[i]
+                    bad = _grow(bad, GROW) & ok
                 keep = ok & ~bad
                 if it == 0:
                     wk = np.where(keep, w, 0)
