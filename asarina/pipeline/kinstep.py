@@ -295,8 +295,14 @@ class Resampler:
     """Map of the skel.hdr pixels into one series' pixels, computed once and applied to all
     its bins (bilinear interpolation times the pixel-area ratio): the same mapping that
     mProjectPP does per image, ~50x faster.  The WCS is evaluated on a coarse grid
-    (every STEP px) and interpolated, it is smooth."""
+    (every STEP px) and interpolated, it is smooth.  The coarse grid reaches PAD steps beyond
+    the image on every side: the cubic spline's boundary condition bends the map within ~3
+    steps of the grid's edge (mode 'nearest': the step went 0.6, 0.9, 1.1, 1.2, 1.1 px per
+    output pixel over the first 40, positions off by up to 1.2 px and, through the
+    Jacobian, the sky scaled by 0.6-1.2 - a damped wave along every edge of the FRAM LL
+    coadds, -2700 / +1100 / -340 ADU on a 11000 ADU sky)."""
     STEP = 16
+    PAD = 4
 
     def __init__(self, series_wcs, skel_path):
         from astropy.wcs import WCS
@@ -305,13 +311,14 @@ class Resampler:
         skel = fits.Header.fromtextfile(skel_path)
         nx, ny = skel['NAXIS1'], skel['NAXIS2']
         w_out, w_in = WCS(skel), WCS(fits.Header(series_wcs))
-        gx = np.arange(0, nx + self.STEP, self.STEP, dtype=float)
-        gy = np.arange(0, ny + self.STEP, self.STEP, dtype=float)
+        p = self.PAD * self.STEP
+        gx = np.arange(-p, nx + self.STEP + p, self.STEP, dtype=float)
+        gy = np.arange(-p, ny + self.STEP + p, self.STEP, dtype=float)
         GX, GY = np.meshgrid(gx, gy)
         ra, dec = w_out.all_pix2world(GX, GY, 0)
         X, Y = w_in.all_world2pix(ra, dec, 0)
         yy, xx = np.mgrid[0:ny, 0:nx].astype(float)
-        cy, cx = yy / self.STEP, xx / self.STEP
+        cy, cx = (yy + p) / self.STEP, (xx + p) / self.STEP
         self.x = map_coordinates(X, [cy, cx], order=3, mode='nearest').astype(np.float32)
         self.y = map_coordinates(Y, [cy, cx], order=3, mode='nearest').astype(np.float32)
         # flux conservation: input pixels per output pixel
