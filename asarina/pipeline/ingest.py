@@ -31,7 +31,7 @@ class PhotometryPipeline:
     def __init__(self,
                  phdb_root: str = "~/phdb",
                  png_root: str = "~/png",
-                 calib_root: str = None,   # None: $ASARINA_CALIB_ROOT or ~/calib (ImageProcessor)
+                 calib_root: str = None,   # None: $ASARINA_CALIB_ROOT, else /home/mates/calib
                  calib_dir_template: str = "/home/mates/flat{year}/",
                  # Alternative dark calibration
                  smart_dark_calib: str = None,
@@ -68,6 +68,9 @@ class PhotometryPipeline:
 
         self.phdb_root = Path(phdb_root).expanduser()
         self.png_root = Path(png_root).expanduser()
+        # the real-time pipeline runs as root at D50: the masters are mates' whatever the user
+        # (~/calib would be /root/calib); $ASARINA_CALIB_ROOT for the archive replays
+        calib_root = calib_root or os.environ.get('ASARINA_CALIB_ROOT') or '/home/mates/calib'
         self.calib_root = calib_root
         self.calib_dir_template = calib_dir_template
 

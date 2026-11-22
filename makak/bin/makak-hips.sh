@@ -12,6 +12,12 @@ mkdir -p $R
 rsync -a --delete --exclude '*.lock' --exclude '*.tmp' \
 	-e 'ssh -i /home/mates/.ssh/hog-morpheus-rsync -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o ForwardX11=no' \
 	morpheus.asu.cas.cz: $R/skymap/
-exec nice /usr/local/bin/asarina-skymap --profile makak hips \
-	--dir $R/skymap --export $R/export --hips $R/hips \
+# The HiPS is built from both maps: the archive reprocess (hog, ~/makak-reprocess/map,
+# most of the data) and the real-time one from morpheus merged into a fresh copy of it
+# (merge is additive, so the combined map is rebuilt from scratch each time).
+rsync -a --delete --exclude '*.lock' --exclude '*.tmp' /home/mates/makak-reprocess/map/ $R/combined/
+/usr/local/bin/asarina-skymap --profile makak merge --dir $R/combined $R/skymap
+# CDS offline (Nov 2026): Hipsgen gets its index.html template via a local proxy
+exec /home/mates/asarina+makak/bin/hips-offline.sh nice /usr/local/bin/asarina-skymap --profile makak hips \
+	--dir $R/combined --export $R/export --hips $R/hips \
 	--jar /storage2/reprocess/Hipsgen.jar --memory 16g --threads 8
