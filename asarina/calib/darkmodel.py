@@ -86,7 +86,7 @@ def wquad(t, y, w):
     return sol.T
 
 
-def fit(darks, wcap=WCAP, clip=CLIP, sat=SATURATION, log=print):
+def fit(darks, wcap=WCAP, clip=CLIP, sat=SATURATION, log=print, level_darks=None):
     t = np.array([d['t'] for d in darks])
     nk = np.array([d['n'] for d in darks], float)
     shape = darks[0]['data'].shape
@@ -98,6 +98,18 @@ def fit(darks, wcap=WCAP, clip=CLIP, sat=SATURATION, log=print):
         log(f"  {os.path.basename(d['path'])}: t {d['t']:7.2f} s  N {d['n']:5d}  {d['date']}  "
             f"level {l:9.3f}  - L(t) {r:+.3f}")
     log(f"level L(t) = {M0:.3f} + {M1:.5f} t  (rms {np.sqrt(np.average(lres ** 2, weights=wl)):.3f} ADU)")
+    level_from = None
+    if level_darks:
+        # the bias drifts (D50: ~1224 ADU in 2024, 1229 in 2025, 1235 in 2026): the pattern
+        # from all the darks, the level from the recent ones
+        tl = np.array([d['t'] for d in level_darks])
+        ll = np.array([level(d['data'])[0] for d in level_darks])
+        wll = np.minimum([d['n'] for d in level_darks], wcap).astype(float)
+        # only the offset: the growth from all the darks (the recent few are of a few nights
+        # each, their levels differ by night more than by exposure)
+        M0 = float(np.average(ll - M1 * tl, weights=wll))
+        level_from = len(level_darks)
+        log(f"level from {len(level_darks)} darks: L(t) = {M0:.3f} + {M1:.5f} t")
 
     Y = np.stack([d['data'].ravel() for d in darks]) - L[:, None]   # (k, npix)
     raw = np.stack([d['data'].ravel() for d in darks])
@@ -114,7 +126,7 @@ def fit(darks, wcap=WCAP, clip=CLIP, sat=SATURATION, log=print):
         floor = 0.5
         W = np.where(np.abs(res) > clip * np.maximum(rms, floor), 0.0, W)
     used = (W > 0).sum(0)
-    return dict(M0=M0, M1=M1, L=L, t=t, n=nk, A=a.reshape(shape), B=b.reshape(shape),
+    return dict(M0=M0, M1=M1, L=L, t=t, n=nk, level_from=level_from, A=a.reshape(shape), B=b.reshape(shape),
                 RMS=rms.reshape(shape), NUSED=used.reshape(shape).astype(np.int16), Y=Y, W=W)
 
 
@@ -123,12 +135,30 @@ def predict(model, t, n=1):
     return n * (model['M0'] + model['M1'] * t + model['A'] + model['B'] * t)
 
 
+SKIP_KEYS = {'SIMPLE', 'BITPIX', 'NAXIS', 'NAXIS1', 'NAXIS2', 'EXTEND', 'BZERO', 'BSCALE', 'EXPTIME',
+             'EXPOSURE', 'NCOMBINE', 'DATE-OBS', 'DATE', 'CTIME', 'USEC', 'JD', 'IMAGETYP', 'COMMENT',
+             'HISTORY', 'IRAF-TLM', 'ORIGIN', 'OBJECT', 'SCRIPT', 'CONTINUE', ''}
+
+
 def write(path, m, darks, temp):
+    # the camera's keys from the first dark (CCD_SER etc.: asarina files the model under that
+    # chip, binning and temperature, as its darks), IMAGETYP dmodel
     h = fits.Header()
+    h0 = fits.getheader(darks[0]['path'])
+    for c in h0.cards:
+        if c.keyword not in SKIP_KEYS and not c.keyword.startswith(('NAXIS', 'MOON', 'SCR')):
+            try:
+                h.append(c)
+            except Exception:
+                pass
+    h['IMAGETYP'] = ('dmodel', 'dark model: L(t) + A + B t per readout')
     h['DMODEL'] = ('L(t)+A+B*t', 'dark of one readout of t s; n readouts: n x')
     h['M0'] = (m['M0'], '[ADU] level at t=0 (bias)')
     h['M1'] = (m['M1'], '[ADU/s] level growth')
-    h['CCD_TEMP'] = (temp, '[C] the darks temperature')
+    if m.get('level_from'):
+        h['LEVELN'] = (m['level_from'], 'the level from this many recent darks')
+    if temp is not None:
+        h['CCD_TEMP'] = (temp, '[C] the darks temperature')
     h['NDARKS'] = (len(darks), 'master darks fitted')
     h['WCAP'] = (WCAP, 'weight cap (frames combined)')
     h['TMIN'] = (min(d['t'] for d in darks), '[s] shortest dark')
@@ -186,6 +216,8 @@ def main(argv=None):
     ap.add_argument('-o', '--output', required=True)
     ap.add_argument('--check', action='store_true', help='curvature check (QUAD extension) and the tests')
     ap.add_argument('--test', nargs='*', default=[], help='master darks to predict (not fitted)')
+    ap.add_argument('--level', nargs='*', default=[], help='take the level L(t) from these darks only '
+                    '(the recent ones: the bias drifts), the pattern from all')
     args = ap.parse_args(argv)
     t0 = time.time()
     darks = load(args.darks)
@@ -193,7 +225,7 @@ def main(argv=None):
     temp = round(float(np.median(temps)), 1) if temps else None
     print(f"darkmodel: {len(darks)} darks, {darks[0]['data'].shape}, t {darks[0]['t']}..{darks[-1]['t']} s, "
           f"temperature {temp} C")
-    m = fit(darks)
+    m = fit(darks, level_darks=load(args.level) if args.level else None)
     write(args.output, m, darks, temp)
     if args.check:
         tests = load(args.test) if args.test else []

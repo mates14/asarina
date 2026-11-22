@@ -72,6 +72,8 @@ class ImageProcessor:
         self.dophot_filter_terms = dophot_filter_terms
         self.master_darks = {}
         self.master_flats = {}
+        self.dark_models = {}       # chip -> temp -> binx -> darkmodel file (asarina-darkmodel)
+        self._dark_model_cache = {}
         self.objects = []
         self.loaded_files = set()
         self.loaded_calib_years = set()
@@ -249,6 +251,15 @@ class ImageProcessor:
                             self.master_darks[chip][temp][binx][key] = filepath
                             num_darks += 1
                         
+                    elif image_type == 'dmodel':
+                        # asarina-darkmodel: the dark of one readout of any exposure; it beats
+                        # the master darks wherever it is found (full frame, cropped for a window)
+                        temp = self._round_temperature(header['CCD_TEMP'])
+                        slot = self.dark_models.setdefault(chip, {}).setdefault(temp, {})
+                        if binx not in slot:
+                            slot[binx] = filepath
+                            num_darks += 1
+
                     elif image_type == 'mflat':
                         fltr = header['FILTER']
                         
@@ -403,6 +414,49 @@ class ImageProcessor:
 
         return None
 
+    def find_dark_model(self, chip: str, temp: float, binx: int) -> Optional[str]:
+        """The dark model (asarina-darkmodel) of this chip, temperature and binning: this
+        year's, else the nearest year's."""
+        rt = self._round_temperature(temp)
+        get = lambda: self.dark_models.get(chip, {}).get(rt, {}).get(binx)
+        if get() is not None:
+            return get()
+        for year in self._year_search_order():
+            self._load_calibration_year(year)
+            if get() is not None:
+                logger.info(f"Using the dark model from {year} (none for {self.observation_year})")
+                return get()
+        return None
+
+    @staticmethod
+    def readouts(header) -> Optional[int]:
+        """Readouts summed into a raw frame: COADDS (the D50 kinetic series: the sum of its
+        KINNUM readouts), 1 for a plain frame; None for an on-chip accumulation without COADDS
+        (what one readout's exposure is there is not known: the master darks take it)."""
+        try:
+            n = int(header.get('COADDS') or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n >= 1:
+            return n
+        if str(header.get('ACQMODE', '')).strip().lower() == 'accumulate' and int(header.get('ACCNUM') or 1) > 1:
+            return None
+        return 1
+
+    def model_dark(self, chip: str, temp: float, binx: int, expt: float, nread: int = 1):
+        """The dark of nread readouts of expt/nread seconds each from the dark model:
+        (full-frame array, description), or (None, None) without a model."""
+        path = self.find_dark_model(chip, temp, binx)
+        if path is None or nread is None:
+            return None, None
+        if path not in self._dark_model_cache:
+            from asarina.calib.darkmodel import load_model
+            self._dark_model_cache = {path: load_model(path)}    # one at a time: 2 x 8 MB
+        m = self._dark_model_cache[path]
+        t = float(expt) / nread
+        d = nread * (m['M0'] + m['M1'] * t + m['A'] + m['B'] * t)
+        return d, f"{os.path.basename(path)} {nread}x{t:g}s"
+
     def _find_flat_in_memory(self, chip: str, fltr: str, binx: int) -> Optional[str]:
         """Search already-loaded flats for a match (no I/O)."""
         if (chip not in self.master_flats or
@@ -467,11 +521,16 @@ class ImageProcessor:
                     logger.warning(f"{output_name}: Would overwrite existing file")
                     return None
 
-                # Find calibration frames
+                # Find calibration frames: the dark model if there is one, else a master dark
                 win0 = self._parse_ccdsec(header)
-                dark_path = self.find_best_dark(chip, temp, binx, expt, shape=data.shape,
-                                                origin=(win0[0].start, win0[1].start) if win0 is not None else None)
                 flat_path = self.find_flat(chip, fltr, binx)
+                model_data, model_desc = self.model_dark(chip, temp, binx, expt, self.readouts(header))
+                if model_data is not None and flat_path is not None and \
+                        model_data.shape != fits.getdata(flat_path).shape:
+                    model_data = None     # not a full frame of this chip: the master darks
+                dark_path = model_desc if model_data is not None else \
+                    self.find_best_dark(chip, temp, binx, expt, shape=data.shape,
+                                        origin=(win0[0].start, win0[1].start) if win0 is not None else None)
 
                 if dark_path is None:
                     self.failure = 'nodark'
@@ -486,8 +545,13 @@ class ImageProcessor:
                     return None
 
                 # Load calibration data
-                with fits.open(dark_path) as dark_hdul:
-                    dark_data = dark_hdul[0].data
+                if model_data is not None:
+                    dark_data = model_data
+                    header['DARK'] = (model_desc[:68], 'dark model, readouts x exposure')
+                else:
+                    with fits.open(dark_path) as dark_hdul:
+                        dark_data = dark_hdul[0].data
+                    header['DARK'] = (os.path.basename(dark_path)[:68], 'master dark')
 
                 with fits.open(flat_path) as flat_hdul:
                     flat_data = flat_hdul[0].data

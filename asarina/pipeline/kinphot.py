@@ -121,13 +121,19 @@ def load_calibration(raw_path, header, expt):
     origin = (window[0].start, window[1].start) if window is not None else None
     # asarina picks by shape and window position: a full frame (cropped below) or a dark
     # of exactly this window
-    dark_path = proc.find_best_dark(chip, header['CCD_TEMP'], binx, expt, shape=shape, origin=origin)
+    # the dark of one readout of expt: the dark model if there is one (exact for any
+    # exposure), else the nearest master dark
     flat_path = proc.find_flat(chip, header['FILTER'], binx)
+    dark, dark_path = proc.model_dark(chip, header['CCD_TEMP'], binx, expt, 1)
+    if dark is not None and flat_path is not None and dark.shape != fits.getdata(flat_path).shape:
+        dark, dark_path = None, None
+    if dark is None:
+        dark_path = proc.find_best_dark(chip, header['CCD_TEMP'], binx, expt, shape=shape, origin=origin)
     if dark_path is None or flat_path is None:
         raise RuntimeError(f"No dark ({dark_path}) or flat ({flat_path}) for {raw_path}")
     log.info(f"dark: {dark_path}")
     log.info(f"flat: {flat_path}")
-    dark = fits.getdata(dark_path).astype(np.float32)
+    dark = (dark if dark is not None else fits.getdata(dark_path)).astype(np.float32)
     flat = fits.getdata(flat_path).astype(np.float32)
 
     if window is not None:
