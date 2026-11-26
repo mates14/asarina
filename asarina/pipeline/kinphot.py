@@ -195,6 +195,12 @@ def subframe_header(raw_hdr, wcs, crop, t_start, exptime, idx, nbin, ref_path, r
     h['EXPOSURE'] = (exptime, 'sub-frame exposure (sum of KINBIN frames)')
     h['KINIDX'] = (idx, 'first kinetic sub-frame index (0-based)')
     h['KINBIN'] = (nbin, 'number of sub-frames summed')
+    # the raw header's COADDS is the whole series' (KINNUM x ACCNUM): a sub-frame has its own
+    try:
+        acc = max(int(raw_hdr.get('ACCNUM') or 1), 1)
+    except (TypeError, ValueError):
+        acc = 1
+    h['COADDS'] = (nbin * acc, 'number of scans summed into this frame')
     h['KINRAW'] = (os.path.basename(raw_path), 'kinetic series mean frame')
     h['KINREF'] = (os.path.basename(ref_path), 'WCS/response taken from')
     return h
@@ -371,8 +377,11 @@ def do_series(arg, args):
     dark, flat, crop = load_calibration(raw_path, raw_hdr, expt1)
     wcs, response, ref_meta = ref_wcs_and_response(ref_path)
 
-    # sanity: the mean of the dump must be the RA frame (RTS2 stores the integer mean)
+    # sanity: the mean of the dump must be the RA frame (RTS2 stored the integer mean; since
+    # 2026-11-03 the frame is the sum of its scans and carries COADDS = KINNUM x ACCNUM)
     rawmean = fits.getdata(raw_path).astype(np.float32)
+    if raw_hdr.get('COADDS'):
+        rawmean /= max(int(raw_hdr['COADDS']) // max(int(raw_hdr.get('ACCNUM') or 1), 1), 1)
     stack = (rawmean - dark) / flat
     if crop is not None:
         stack = stack[crop]
@@ -432,6 +441,9 @@ def do_series(arg, args):
                 deep = deep[crop]
         detect = f"{workroot}/{stem}-deep.fits"
         dhdr = subframe_header(raw_hdr, wcs, crop, t0 + first * cycle, expt1, first, last - first, ref_path, raw_path)
+        # a mean, not a sum: one scan's saturation (its read noise is overstated, harmless
+        # for detection)
+        dhdr['COADDS'] = (max(int(raw_hdr.get('ACCNUM') or 1), 1), 'mean of scans: one scan')
         fits.PrimaryHDU(data=deep.astype(np.float32), header=dhdr).writeto(detect)
         phcat_cmd = phcat_cmd + ['-D', detect]
         log.info(f"{stem}: forced photometry, detection on the mean of sub-frames {first}:{last}")

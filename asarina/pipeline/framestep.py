@@ -46,6 +46,7 @@ from astropy.table import Table
 from astropy.wcs import WCS
 
 from pyrt.core.stack import _sky, _sky_at, MESH
+from pyrt.utils.camera_config import readouts
 
 from asarina.pipeline.kinphot import ref_wcs_and_response, fixed_terms, WCS_RE, STALE_TIME
 from asarina.pipeline.kinstep import (Resampler, copy_keys, mark_accumulated, photometry, merge_terms,
@@ -250,7 +251,9 @@ def bin_header(skel, frames, k, first_hdr):
     hdr['FRMEXPT'] = (round(sum(f.exptime for f in frames), 3), '[s] summed exposure of the frames')
     hdr['NFRAMES'] = (len(frames), 'frames in this bin')
     hdr['FRAMES'] = (' '.join(f.stem[-6:] + f.camera for f in frames)[:68], 'stems (tail) and cameras')
-    mark_accumulated(hdr, k)
+    # the frames' own sums count: a D50 kinetic series frame is 96 scans (COADDS) since
+    # 2026-11, and with ACCNUM=k alone every star of a bin of them was "saturated"
+    mark_accumulated(hdr, sum(readouts(f.hdr) for f in frames))
     return hdr
 
 

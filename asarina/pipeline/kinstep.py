@@ -183,10 +183,22 @@ def calibrate_sum(series, a, b, dark, flat, crop):
 
 
 def mark_accumulated(hdr, n):
-    """A sum of n readouts, as Andor's accumulate mode: phcat scales the saturation and
-    the read noise by ACCNUM (gain unchanged)."""
-    hdr['ACQMODE'] = ('Accumulate', 'sum of kinetic sub-frames (kinstep)')
+    """A sum of n readouts in all, as Andor's accumulate mode: COADDS (what pyrt reads,
+    pyrt.utils.camera_config.readouts) and ACCNUM, both n.  The header copied from a raw
+    frame carries the raw frame's COADDS (a D50 kinetic series: 96), which must not
+    survive into a sub-frame or a bin."""
+    hdr['ACQMODE'] = ('Accumulate', 'sum of frames (asarina)')
     hdr['ACCNUM'] = (int(n), 'readouts summed')
+    hdr['COADDS'] = (int(n), 'number of scans summed into this frame')
+
+
+def scan_readouts(hdr):
+    """Readouts in one scan of a kinetic series (one sub-frame of the KINFILE dump): ACCNUM
+    (the driver's COADDS of the series frame is KINNUM x ACCNUM)."""
+    try:
+        return max(int(hdr.get('ACCNUM') or 1), 1)
+    except (TypeError, ValueError):
+        return 1
 
 
 def centroids(img, xy, r=5):
@@ -240,7 +252,7 @@ def write_image(path, data, series, a, b, expt1, shift=(0.0, 0.0)):
     for k in [k for k in hdr if k.startswith('NAXIS') or k in ('BITPIX', 'EXTEND', 'SIMPLE')]:
         del hdr[k]
     hdr['KINSTEM'] = (series.stem, 'kinetic series')
-    mark_accumulated(hdr, b - a)
+    mark_accumulated(hdr, (b - a) * scan_readouts(series.hdr))
     # the field drifts within a series (tracking, wind): the series WCS shifted by the
     # measured offset against the series sum
     hdr['KINDX'] = (round(shift[0], 3), '[px] shift against the series sum')
@@ -481,7 +493,7 @@ def main():
             log.warning(f"deep.fits is {scale:.2f} x a series sum, expected {ns}")
             if not np.isfinite(scale):
                 scale = ns
-        mark_accumulated(d[0].header, int(round(scale * args.nsub)))
+        mark_accumulated(d[0].header, int(round(scale * args.nsub)) * scan_readouts(series[0].hdr))
         d[0].data = np.nan_to_num(d[0].data, nan=0.0).astype(np.float32)
     log.info(f"deep.fits {hd['NAXIS1']}x{hd['NAXIS2']} from {len(series)} series in {time.time() - t:.1f}s")
     # the common footprint: pyrt-combine grids the union of the series, but where a series
