@@ -28,7 +28,8 @@ Apply (fix_dark): for each catalogued pixel of a frame of total exposure T,
       = the pixel's dark-current excess over its neighbours, whatever the dark was;
   the nearest level b_k (tot / T) is taken when it is told from the next by > NSIG sigma of
   the ring and no star sits on the pixel (the 3x3 neighbours not above the ring), and the
-  dark of that pixel becomes median(dark ring) + b_k T; otherwise the dark is left as it was.
+  dark of that pixel becomes median(dark ring) + A0 + b_k T (A0: optional column, the pixel's
+  excess at t = 0 [ADU], 0 when absent); otherwise the dark is left as it was.
   The levels are measured the same way in the build: the pixel over the median of its ring.
   KIND (column absent: all R): R as above; S a pixel that changed once (a hot pixel born or
   healed): LEVEL[0] before MJD TCH0, LEVEL[1] after TCH1, set by the frame's date, told per
@@ -278,14 +279,15 @@ def load(path):
         kind = (np.char.strip(np.asarray(t['KIND']).astype(str)) if 'KIND' in names else np.full(n, 'R'))
         tch0 = t['TCH0'].astype(np.float64) if 'TCH0' in names else np.full(n, np.nan)
         tch1 = t['TCH1'].astype(np.float64) if 'TCH1' in names else np.full(n, np.nan)
+        a0 = t['A0'].astype(np.float64) if 'A0' in names else np.zeros(n)
         return dict(x=t['X'].astype(int), y=t['Y'].astype(int), level=t['LEVEL'].astype(np.float64),
-                    kind=kind, tch0=tch0, tch1=tch1, header=f[0].header)
+                    kind=kind, tch0=tch0, tch1=tch1, a0=a0, header=f[0].header)
 
 
-def write_table(path, header, x, y, level, kind, tch0=None, tch1=None, extra=None):
+def write_table(path, header, x, y, level, kind, tch0=None, tch1=None, a0=None, extra=None):
     """A catalogue from any search: KIND R (switches, levels told per frame), S (one step:
     LEVEL[0] before TCH0, LEVEL[1] after TCH1, MJD; between them told per frame like R),
-    M (always bad).  extra: {name: (format, array)} more columns."""
+    M (always bad); a0: [ADU] the pixel's excess at t = 0.  extra: {name: (format, array)}."""
     n = len(x)
     lev = np.full((n, MAXLEV), np.nan, np.float32)
     for i, l in enumerate(level):
@@ -297,7 +299,8 @@ def write_table(path, header, x, y, level, kind, tch0=None, tch1=None, extra=Non
             fits.Column('LEVEL', f'{MAXLEV}E', unit='ADU/s', array=lev),
             fits.Column('KIND', '1A', array=np.asarray(kind, 'U1')),
             fits.Column('TCH0', 'D', unit='MJD', array=np.full(n, np.nan) if tch0 is None else np.asarray(tch0, float)),
-            fits.Column('TCH1', 'D', unit='MJD', array=np.full(n, np.nan) if tch1 is None else np.asarray(tch1, float))]
+            fits.Column('TCH1', 'D', unit='MJD', array=np.full(n, np.nan) if tch1 is None else np.asarray(tch1, float)),
+            fits.Column('A0', 'E', unit='ADU', array=np.zeros(n, np.float32) if a0 is None else np.asarray(a0, np.float32))]
     for k, (fmt, arr) in (extra or {}).items():
         cols.append(fits.Column(k, fmt, array=arr))
     t = fits.BinTableHDU.from_columns(cols, name='RTS')
@@ -338,6 +341,7 @@ def fix_dark(data, dark, cat, exptime, origin=(0, 0), nsig=NSIG, sat=None, mjd=N
     kind = np.asarray(cat.get('kind', np.full(n_all, 'R')))[inside]
     tch0 = np.asarray(cat.get('tch0', np.full(n_all, np.nan)))[inside]
     tch1 = np.asarray(cat.get('tch1', np.full(n_all, np.nan)))[inside]
+    a0 = np.asarray(cat.get('a0', np.zeros(n_all)))[inside]
     out = dark.astype(np.float64, copy=True)
     if len(y) == 0:
         return out, dict(n=0, fixed=0, unknown=0, state=np.zeros(0, int), bad=(y, x))
@@ -371,7 +375,9 @@ def fix_dark(data, dark, cat, exptime, origin=(0, 0), nsig=NSIG, sat=None, mjd=N
     good = (~star) & (gap_ > nsig * sig) & (dist[P, k1] < 0.5 * gap_ - 2 * sig) & ~masked
     k1 = np.where(dated, dk, k1)
     good = (good | dated) & ~masked
-    out[y[good], x[good]] = dring[good] + exp_[P[good], k1[good]]
+    # absolute: the ring of the dark + A0 + level T (moving the dark by a difference of levels
+    # from the state it shows did worse on FRAM-ORM: its master dark is a blend of states)
+    out[y[good], x[good]] = dring[good] + a0[good] + exp_[P[good], k1[good]]
     state = np.where(good, k1, -1)
     return out, dict(n=len(y), fixed=int(good.sum()), unknown=int((~good).sum()), state=state,
                      bad=(y[~good], x[~good]))
