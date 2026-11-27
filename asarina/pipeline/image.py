@@ -76,6 +76,7 @@ class ImageProcessor:
         self._dark_model_cache = {}
         self.rts_cats = {}          # chip -> temp -> binx -> RTS pixel catalogue (asarina-rtspix)
         self._rts_cache = {}
+        self._rts_found = {}        # (chip, temp, binx) -> catalogue path or None
         self.objects = []
         self.loaded_files = set()
         self.loaded_calib_years = set()
@@ -439,17 +440,30 @@ class ImageProcessor:
 
     def find_rtspix(self, chip: str, temp: float, binx: int):
         """The RTS pixel catalogue (asarina-rtspix) of this chip, temperature and binning:
-        this year's, else the nearest year's; loaded, or None."""
+        this year's, else the nearest year's; loaded, or None.  Looks only for rtspix-*.fits
+        in calib_root/chip/year: never loads another year's darks or flats (those would then
+        compete in find_best_dark for the cameras that have no catalogue)."""
         rt = self._round_temperature(temp)
-        get = lambda: self.rts_cats.get(chip, {}).get(rt, {}).get(binx)
-        path = get()
-        if path is None:
-            for year in self._year_search_order():
-                self._load_calibration_year(year)
-                path = get()
+        key = (chip, rt, binx)
+        if key not in self._rts_found:
+            path = self.rts_cats.get(chip, {}).get(rt, {}).get(binx)
+            years = ([self.observation_year] if self.observation_year else []) + self._year_search_order()
+            for year in years if path is None and chip else []:
+                for f in sorted((self.calib_root / chip / str(year)).glob('rtspix-*.fits')):
+                    try:
+                        h = fits.getheader(f)
+                    except Exception:
+                        continue
+                    if h.get('IMAGETYP') == 'rtspix' and 'CCD_TEMP' in h and \
+                            self._round_temperature(h['CCD_TEMP']) == rt and int(h.get('BINX', 1)) == binx:
+                        path = str(f)
+                        if year != self.observation_year:
+                            logger.info(f"Using the RTS pixel catalogue from {year} (none for {self.observation_year})")
+                        break
                 if path is not None:
-                    logger.info(f"Using the RTS pixel catalogue from {year} (none for {self.observation_year})")
                     break
+            self._rts_found[key] = path
+        path = self._rts_found[key]
         if path is None:
             return None
         if path not in self._rts_cache:
