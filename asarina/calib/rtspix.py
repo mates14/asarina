@@ -284,6 +284,25 @@ def load(path):
                     kind=kind, tch0=tch0, tch1=tch1, a0=a0, header=f[0].header)
 
 
+COVER = 30.0      # [d] a catalogue is used this far outside its DATE0..DATE1
+
+
+def covers(cat, mjd, margin=COVER):
+    """Whether the frame (mjd) is within the catalogue's DATE0..DATE1 (+- margin days);
+    True when the header has no dates."""
+    from astropy.time import Time
+    h = cat.get('header') or {}
+    d0, d1 = str(h.get('DATE0', '') or ''), str(h.get('DATE1', '') or '')
+    try:
+        if d0 and mjd < Time(d0[:10]).mjd - margin:
+            return False
+        if d1 and mjd > Time(d1[:10]).mjd + 1 + margin:
+            return False
+    except ValueError:
+        return True
+    return True
+
+
 def write_table(path, header, x, y, level, kind, tch0=None, tch1=None, a0=None, extra=None):
     """A catalogue from any search: KIND R (switches, levels told per frame), S (one step:
     LEVEL[0] before TCH0, LEVEL[1] after TCH1, MJD; between them told per frame like R),

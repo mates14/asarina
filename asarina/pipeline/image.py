@@ -439,15 +439,16 @@ class ImageProcessor:
         return None
 
     def find_rtspix(self, chip: str, temp: float, binx: int):
-        """The RTS pixel catalogue (asarina-rtspix) of this chip, temperature and binning:
-        this year's, else the nearest year's; loaded, or None.  Looks only for rtspix-*.fits
-        in calib_root/chip/year: never loads another year's darks or flats (those would then
-        compete in find_best_dark for the cameras that have no catalogue)."""
+        """The RTS pixel catalogue (asarina-rtspix) of this chip, temperature and binning of
+        the observation year (no other year: the pixels come and go - one of 2026 on 2024
+        frames would set pixels that were not two-faced yet); loaded, or None.  Looks only
+        for rtspix-*.fits in calib_root/chip/year: never loads darks or flats.  The caller
+        also checks the frame's date against its DATE0..DATE1 (rtspix.covers)."""
         rt = self._round_temperature(temp)
         key = (chip, rt, binx)
         if key not in self._rts_found:
             path = self.rts_cats.get(chip, {}).get(rt, {}).get(binx)
-            years = ([self.observation_year] if self.observation_year else []) + self._year_search_order()
+            years = [self.observation_year] if self.observation_year else []
             for year in years if path is None and chip else []:
                 for f in sorted((self.calib_root / chip / str(year)).glob('rtspix-*.fits')):
                     try:
@@ -457,8 +458,6 @@ class ImageProcessor:
                     if h.get('IMAGETYP') == 'rtspix' and 'CCD_TEMP' in h and \
                             self._round_temperature(h['CCD_TEMP']) == rt and int(h.get('BINX', 1)) == binx:
                         path = str(f)
-                        if year != self.observation_year:
-                            logger.info(f"Using the RTS pixel catalogue from {year} (none for {self.observation_year})")
                         break
                 if path is not None:
                     break
@@ -623,10 +622,16 @@ class ImageProcessor:
 
                 # Two-faced (RTS) hot pixels: the dark of each at the level this frame shows
                 rts = self.find_rtspix(chip, temp, binx)
+                mjd = (float(c_time) + 0.5 * float(expt)) / 86400.0 + 40587.0
+                if rts is not None:
+                    from asarina.calib.rtspix import covers
+                    if not covers(rts, mjd):
+                        logger.info(f"{output_name}: RTS catalogue {os.path.basename(rts['path'])} is of "
+                                    f"{rts['header'].get('DATE0')}..{rts['header'].get('DATE1')}, not used")
+                        rts = None
                 if rts is not None:
                     from asarina.calib.rtspix import fix_dark
                     origin = (window[0].start or 0, window[1].start or 0) if window is not None else (0, 0)
-                    mjd = (float(c_time) + 0.5 * float(expt)) / 86400.0 + 40587.0
                     dark_data, rs = fix_dark(data, dark_data, rts, float(expt), origin=origin, mjd=mjd)
                     header['RTSPIX'] = (os.path.basename(rts['path'])[:68], 'RTS hot pixel catalogue')
                     header['RTSFIX'] = (rs['fixed'], 'RTS pixels set to the level seen')
