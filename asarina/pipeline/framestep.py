@@ -24,6 +24,15 @@ Per step:
      dophot with the deep response fixed, zeropoint free -> per-bin ECSVs for
      transients.py (flare search on ~12 points).
 
+Sky frame (--sky-frame; auto: when the frames carry RTSPIX, i.e. the camera has two-faced
+hot pixels, FRAM-ORM): before 2., per camera, the median over the series of every pixel's
+sky-subtracted rate (stars masked by their 3x3 neighbourhood, so a lone hot pixel stays),
+subtracted from every frame times its exposure where it is significant (> SKY_NSIG of its
+scatter over the frame).  An RTS pixel keeps its state for hours, so this takes out what a
+frame alone cannot decide (short exposures, bright sky) and the traces it leaves in the
+stacks.  Only for a dithered series (the stars move by > SKY_DITHER px), else the stars would
+go too; nothing is subtracted elsewhere, so no noise is added.
+
 Inputs: calibrated frames (the df.fits imgproc copies to the kinseries spool) with their
 ECSVs (solution, zeropoint), in pairs FITS:ECSV, or FITS alone with the ECSV next to it.
 
@@ -66,6 +75,10 @@ CLIP_AMP = 1.0         # tolerance as a fraction of the median: the cores of bri
 CLIP_NEAR = 2.0        # [sigma] a high pixel with a neighbour in time this high is a source
                        # lasting more than one frame (a fading afterglow, a flare), not a hit
 CLIP_MIN = 5           # frames on a pixel to test it at all
+SKY_MIN_FRAMES = 8     # sky frame: frames of one camera it needs
+SKY_NSIG = 5.0         # sky frame: subtracted where the median rate exceeds this x its scatter
+SKY_DITHER = 2.0       # [px] sky frame: median offset of the frames from the series' median pointing
+SKY_MEM = 3e9          # [B] sky frame: the frame cube of one camera at most
 GROW = 1               # [px] a rejected pixel's neighbours go with it (the resampling spreads a hit)
 
 
@@ -84,9 +97,69 @@ class Frame:
         self.shape = (self.hdr['NAXIS2'], self.hdr['NAXIS1'])
         self.camera = self.hdr.get('CCD_NAME', '?')
         self.stem = os.path.basename(fpath)[:18]
+        self.skyframe = None     # [ADU/s] see sky_frames()
 
     def data(self):
-        return fits.getdata(self.path).astype(np.float32)
+        d = fits.getdata(self.path).astype(np.float32)
+        if self.skyframe is not None:
+            d -= self.skyframe * np.float32(self.exptime)
+        return d
+
+
+def sky_frames(frames, mode='auto', nsig=SKY_NSIG, dither_min=SKY_DITHER):
+    """Set Frame.skyframe per camera: the significant part of the median over the series of
+    each pixel's sky-subtracted rate (see the module docstring).  Returns log lines."""
+    from scipy.ndimage import median_filter, binary_dilation, label
+    msgs = []
+    if mode == 'off':
+        return msgs
+    for cam in sorted(set(f.camera for f in frames)):
+        fr = [f for f in frames if f.camera == cam]
+        if mode == 'auto' and not all('RTSPIX' in f.hdr for f in fr):
+            continue
+        shapes = {f.shape for f in fr}
+        if len(fr) < (SKY_MIN_FRAMES if mode == 'auto' else 3) or len(shapes) > 1:
+            msgs.append(f"sky frame {cam}: {len(fr)} frames, {len(shapes)} shapes - none")
+            continue
+        ny, nx = fr[0].shape
+        if len(fr) * ny * nx * 4 > SKY_MEM:
+            msgs.append(f"sky frame {cam}: {len(fr)} frames of {nx}x{ny} too big - none")
+            continue
+        # dithering: the frame centre of each frame in the first frame's pixels
+        w0 = WCS(fits.Header(fr[0].wcs))
+        xy = np.array([w0.all_world2pix(WCS(fits.Header(f.wcs)).all_pix2world([[nx / 2, ny / 2]], 0), 0)[0]
+                       for f in fr])
+        dith = float(np.median(np.hypot(*(xy - np.median(xy, axis=0)).T)))
+        if dith < dither_min:
+            msgs.append(f"sky frame {cam}: not dithered ({dith:.1f} px) - none")
+            continue
+        cube = np.empty((len(fr), ny, nx), np.float32)
+        for i, f in enumerate(fr):
+            d = fits.getdata(f.path).astype(np.float32)
+            med, rms = _sky(d)
+            x = d - _sky_at(med, MESH, 0, ny, 0, nx)
+            star = binary_dilation(median_filter(np.nan_to_num(x), size=3) > 3 * rms, iterations=2)
+            cube[i] = np.where(star | ~np.isfinite(x), np.nan, x / np.float32(f.exptime))
+        ok = np.isfinite(cube)
+        cnt = ok.sum(axis=0)
+        R = _nanmedian0(cube, ok)
+        del cube
+        good = np.isfinite(R) & (cnt >= max(3, len(fr) // 3))
+        r = R[good]
+        sr = 1.4826 * float(np.median(np.abs(r - np.median(r)))) if r.size else np.inf
+        use = good & (np.abs(R) > nsig * sr)
+        # only isolated pixels (1-2 px): a hot/RTS pixel; a larger group is a star remnant, a
+        # column, the overscan - left to the stack's rejection
+        lab, nl = label(use)
+        if nl:
+            size = np.bincount(lab.ravel())
+            use &= (size <= 2)[lab]
+        S = np.where(use, R, 0).astype(np.float32)
+        for f in fr:
+            f.skyframe = S
+        msgs.append(f"sky frame {cam}: {len(fr)} frames, dither {dith:.0f} px, scatter {sr:.4f} ADU/s, "
+                    f"{int(use.sum())} px subtracted ({int((S > 0).sum())} high, {int((S < 0).sum())} low)")
+    return msgs
 
 
 def make_skel(frames, path):
@@ -275,6 +348,10 @@ def main():
                     help='phcat aperture photometry: numpy (IRAF phot reimplemented, fast; default) or IRAF')
     ap.add_argument('--stack', choices=('clip', 'mean'), default='clip',
                     help='clip: weighted mean with outlier rejection (default); mean: plain weighted mean')
+    ap.add_argument('--sky-frame', choices=('auto', 'on', 'off'), default='auto',
+                    help='subtract the series sky frame where significant (auto: frames with RTSPIX)')
+    ap.add_argument('--sky-dither', type=float, default=SKY_DITHER,
+                    help=f'[px] least median dither for the sky frame (default {SKY_DITHER:g})')
     ap.add_argument('-k', '--keep', action='store_true', help='keep the work files')
     ap.add_argument('-v', '--verbose', action='store_true')
     args = ap.parse_args()
@@ -323,6 +400,8 @@ def main():
 
     # 1.-3. common grid, resampled and scaled frames, bins
     t = time.time()
+    for m in sky_frames(frames, args.sky_frame, dither_min=args.sky_dither):
+        log.info(m)
     skel = make_skel(frames, f"{work}/skel.hdr")
     shape = (skel['NAXIS2'], skel['NAXIS1'])
     zref = frames[0].zp
