@@ -74,6 +74,8 @@ class ImageProcessor:
         self.master_flats = {}
         self.dark_models = {}       # chip -> temp -> binx -> darkmodel file (asarina-darkmodel)
         self._dark_model_cache = {}
+        self.rts_cats = {}          # chip -> temp -> binx -> RTS pixel catalogue (asarina-rtspix)
+        self._rts_cache = {}
         self.objects = []
         self.loaded_files = set()
         self.loaded_calib_years = set()
@@ -260,6 +262,13 @@ class ImageProcessor:
                             slot[binx] = filepath
                             num_darks += 1
 
+                    elif image_type == 'rtspix':
+                        # asarina-rtspix: the two-faced hot pixels, their dark set per frame
+                        temp = self._round_temperature(header['CCD_TEMP'])
+                        slot = self.rts_cats.setdefault(chip, {}).setdefault(temp, {})
+                        if binx not in slot:
+                            slot[binx] = filepath
+
                     elif image_type == 'mflat':
                         fltr = header['FILTER']
                         
@@ -428,6 +437,27 @@ class ImageProcessor:
                 return get()
         return None
 
+    def find_rtspix(self, chip: str, temp: float, binx: int):
+        """The RTS pixel catalogue (asarina-rtspix) of this chip, temperature and binning:
+        this year's, else the nearest year's; loaded, or None."""
+        rt = self._round_temperature(temp)
+        get = lambda: self.rts_cats.get(chip, {}).get(rt, {}).get(binx)
+        path = get()
+        if path is None:
+            for year in self._year_search_order():
+                self._load_calibration_year(year)
+                path = get()
+                if path is not None:
+                    logger.info(f"Using the RTS pixel catalogue from {year} (none for {self.observation_year})")
+                    break
+        if path is None:
+            return None
+        if path not in self._rts_cache:
+            from asarina.calib.rtspix import load as load_rts
+            self._rts_cache = {path: load_rts(path)}
+            self._rts_cache[path]['path'] = path
+        return self._rts_cache[path]
+
     @staticmethod
     def readouts(header) -> Optional[int]:
         """Readouts summed into a raw frame: COADDS (the D50 kinetic series: the sum of its
@@ -576,6 +606,17 @@ class ImageProcessor:
                     if dark_data.shape != data.shape:   # a window-sized dark needs no crop
                         dark_data = dark_data[window]
                     flat_data = flat_data[window]
+
+                # Two-faced (RTS) hot pixels: the dark of each at the level this frame shows
+                rts = self.find_rtspix(chip, temp, binx)
+                if rts is not None:
+                    from asarina.calib.rtspix import fix_dark
+                    origin = (window[0].start or 0, window[1].start or 0) if window is not None else (0, 0)
+                    dark_data, rs = fix_dark(data, dark_data, rts, float(expt), origin=origin)
+                    header['RTSPIX'] = (os.path.basename(rts['path'])[:68], 'RTS hot pixel catalogue')
+                    header['RTSFIX'] = (rs['fixed'], 'RTS pixels set to the level seen')
+                    header['RTSUNK'] = (rs['unknown'], 'RTS pixels undecided, dark as was')
+                    logger.debug(f"  {output_name}: RTS pixels {rs['fixed']} fixed, {rs['unknown']} undecided")
 
                 # Perform calibration
                 calibrated = (data - dark_data) / flat_data
