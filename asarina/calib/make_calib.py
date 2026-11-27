@@ -586,6 +586,10 @@ CAMERA_FILTERS = {
         "mi6167": {"min_median": 5000, "max_median": 50000},
         "mi2066": {"min_median": 5000, "max_median": 50000},
         "mi2065": {"min_median": 5000, "max_median": 50000},
+        # FRAM-ORM G2-1000BI (CCD47-10): its skyflats are taken low, median
+        # 2800-4200 ADU (p10-p90, bias ~480 included), and the 5000 default
+        # (set for the BOOTES Andor frame-transfer problem) dropped all 10480.
+        "mi2596": {"min_median": 1500, "max_median": 50000},
     },
 }
 
