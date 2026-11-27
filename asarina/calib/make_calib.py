@@ -593,6 +593,10 @@ CAMERA_FILTERS = {
     },
 }
 
+# Cameras not in CAMERA_FILTERS (logged, so their own entry can be set from the data)
+DEFAULT_DARK_FILTER = {"max_sigma": 50, "min_median": None, "max_median": None}
+DEFAULT_FLAT_FILTER = {"min_median": 5000, "max_median": 50000}
+
 
 # Default config
 DEFAULT_CONFIG = CalibConfig(
@@ -985,94 +989,6 @@ def compute_stats_parallel(files: list, image_type: str, n_workers: int = None,
         log(f"Cached {len(newly_computed)} new stats", "debug")
 
     return results
-
-
-def filter_darks(stats_list: list, config: CalibConfig, camera: str) -> list:
-    """Filter dark frames based on telescope/camera-specific criteria."""
-    if camera not in config.dark_filter:
-        log(f"No dark filter defined for camera {camera}, using all frames", "warn")
-        return stats_list
-
-    n_input = len(stats_list)
-    n_incomplete = sum(1 for s in stats_list
-                       if s.get('sigma') is None or s.get('median') is None)
-    if n_incomplete > 0:
-        log(f"Skipping {n_incomplete}/{n_input} frames with incomplete stats", "debug")
-
-    filt = config.dark_filter[camera]
-    filtered = []
-
-    # Debug: show actual value ranges to help tune filters
-    valid_stats = [s for s in stats_list if s and s.get('median') is not None and s.get('sigma') is not None]
-    if valid_stats:
-        medians = [s['median'] for s in valid_stats]
-        sigmas = [s['sigma'] for s in valid_stats]
-        log(f"Input stats: median={min(medians):.0f}-{max(medians):.0f}, "
-            f"sigma={min(sigmas):.1f}-{max(sigmas):.1f}", "debug")
-        log(f"Filter: {filt}", "debug")
-
-    for s in stats_list:
-        if s is None:
-            continue
-
-        # Check temperature stabilization (configurable tolerance)
-        if s['ccd_temp'] is not None and s['ccd_set'] is not None:
-            temp_diff = abs(s['ccd_temp'] - s['ccd_set'])
-            if temp_diff > config.temp_tolerance:
-                log(f"Skipping {s['file']} - temperature not stabilized ({s['ccd_temp']:.1f} vs {s['ccd_set']:.1f})", "debug")
-                continue
-
-        # Skip entries with missing stats
-        if s['sigma'] is None or s['median'] is None or s['average'] is None:
-            continue
-
-        # Apply sigma filter
-        if 'max_sigma' in filt and s['sigma'] > filt['max_sigma']:
-            continue
-
-        # Apply median filters
-        if 'min_median' in filt and filt['min_median'] is not None and s['median'] < filt['min_median']:
-            continue
-        if 'max_median' in filt and filt['max_median'] is not None and s['median'] > filt['max_median']:
-            continue
-
-        # D50-specific: median-average difference check
-        if 'median_diff_max' in filt:
-            diff = abs(s['median'] - s['average'])
-            if diff > filt['median_diff_max']:
-                continue
-
-        filtered.append(s)
-
-    return filtered
-
-
-def filter_flats(stats_list: list, config: CalibConfig, camera: str) -> list:
-    """Filter flat frames based on telescope/camera-specific criteria."""
-    if camera not in config.flat_filter:
-        log(f"No flat filter defined for camera {camera}, using all frames", "warn")
-        return stats_list
-
-    filt = config.flat_filter[camera]
-    filtered = []
-
-    for s in stats_list:
-        if s is None:
-            continue
-
-        # Apply sigma filter (min for flats - need good signal)
-        if 'min_sigma' in filt and s['sigma'] < filt['min_sigma']:
-            continue
-
-        # Apply median filters
-        if 'min_median' in filt and s['median'] < filt['min_median']:
-            continue
-        if 'max_median' in filt and s['median'] > filt['max_median']:
-            continue
-
-        filtered.append(s)
-
-    return filtered
 
 
 def group_darks(stats_list: list) -> dict:
@@ -1841,7 +1757,7 @@ def filter_darks_generic(stats_list: list, config: CalibConfig) -> list:
     instead of guesswork.
     """
     # Permissive defaults for unknown cameras - let validation catch bad frames
-    default_filter = {"max_sigma": 50, "min_median": None, "max_median": None}
+    default_filter = DEFAULT_DARK_FILTER
 
     # Per-reason rejection counters for diagnostics
     drop = defaultdict(int)
@@ -1924,8 +1840,7 @@ def filter_flats_generic(stats_list: list, config: CalibConfig) -> list:
     Like filter_darks_generic, logs the per-camera median distribution and a
     per-reason rejection breakdown so flat thresholds can be set from real data.
     """
-    # Permissive defaults for unknown cameras
-    default_filter = {"min_median": 5000, "max_median": 50000}
+    default_filter = DEFAULT_FLAT_FILTER
 
     drop = defaultdict(int)
     filtered = []
