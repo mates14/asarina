@@ -626,11 +626,15 @@ class ImageProcessor:
                 if rts is not None:
                     from asarina.calib.rtspix import fix_dark
                     origin = (window[0].start or 0, window[1].start or 0) if window is not None else (0, 0)
-                    dark_data, rs = fix_dark(data, dark_data, rts, float(expt), origin=origin)
+                    mjd = (float(c_time) + 0.5 * float(expt)) / 86400.0 + 40587.0
+                    dark_data, rs = fix_dark(data, dark_data, rts, float(expt), origin=origin, mjd=mjd)
                     header['RTSPIX'] = (os.path.basename(rts['path'])[:68], 'RTS hot pixel catalogue')
                     header['RTSFIX'] = (rs['fixed'], 'RTS pixels set to the level seen')
-                    header['RTSUNK'] = (rs['unknown'], 'RTS pixels undecided, dark as was')
+                    header['RTSUNK'] = (rs['unknown'], 'RTS pixels undecided, dark as was, BADPIX')
+                    bad_yx = rs['bad']
                     logger.debug(f"  {output_name}: RTS pixels {rs['fixed']} fixed, {rs['unknown']} undecided")
+                else:
+                    bad_yx = None
 
                 # Perform calibration
                 calibrated = (data - dark_data) / flat_data
@@ -643,6 +647,16 @@ class ImageProcessor:
                         header['CRPIX1'] -= crop[1].start  # column offset
                     if 'CRPIX2' in header:
                         header['CRPIX2'] -= crop[0].start  # row offset
+
+                # The pixels whose dark is not known, in the output's own pixels: BADPIX
+                if bad_yx is not None and len(bad_yx[0]):
+                    by, bx = bad_yx
+                    if crop is not None:
+                        by, bx = by - (crop[0].start or 0), bx - (crop[1].start or 0)
+                    cy, cx = calibrated.shape
+                    keep = (by >= 0) & (by < cy) & (bx >= 0) & (bx < cx)
+                    from pyrt.utils import badpix
+                    badpix.to_header(header, by[keep], bx[keep], nx=cx)
 
                 output_hdu = fits.PrimaryHDU(data=calibrated, header=header)
 

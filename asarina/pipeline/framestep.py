@@ -56,6 +56,7 @@ from astropy.wcs import WCS
 
 from pyrt.core.stack import _sky, _sky_at, MESH
 from pyrt.utils.camera_config import readouts
+from pyrt.utils import badpix
 
 from asarina.pipeline.kinphot import ref_wcs_and_response, fixed_terms, WCS_RE, STALE_TIME
 from asarina.pipeline.kinstep import (Resampler, copy_keys, mark_accumulated, photometry, merge_terms,
@@ -100,9 +101,14 @@ class Frame:
         self.skyframe = None     # [ADU/s] see sky_frames()
 
     def data(self):
+        """The frame, the sky frame off, its BADPIX pixels (pyrt.utils.badpix) NaN: left out
+        of the stacks (the bilinear resampling blanks at most their 2x2 output neighbours)."""
         d = fits.getdata(self.path).astype(np.float32)
         if self.skyframe is not None:
             d -= self.skyframe * np.float32(self.exptime)
+        by, bx = badpix.from_header(self.hdr)
+        if len(by):
+            d[by, bx] = np.nan
         return d
 
 
@@ -135,7 +141,7 @@ def sky_frames(frames, mode='auto', nsig=SKY_NSIG, dither_min=SKY_DITHER):
             continue
         cube = np.empty((len(fr), ny, nx), np.float32)
         for i, f in enumerate(fr):
-            d = fits.getdata(f.path).astype(np.float32)
+            d = f.data() if f.skyframe is None else fits.getdata(f.path).astype(np.float32)
             med, rms = _sky(d)
             x = d - _sky_at(med, MESH, 0, ny, 0, nx)
             star = binary_dilation(median_filter(np.nan_to_num(x), size=3) > 3 * rms, iterations=2)

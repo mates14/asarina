@@ -30,6 +30,12 @@ Apply (fix_dark): for each catalogued pixel of a frame of total exposure T,
   the ring and no star sits on the pixel (the 3x3 neighbours not above the ring), and the
   dark of that pixel becomes median(dark ring) + b_k T; otherwise the dark is left as it was.
   The levels are measured the same way in the build: the pixel over the median of its ring.
+  KIND (column absent: all R): R as above; S a pixel that changed once (a hot pixel born or
+  healed): LEVEL[0] before MJD TCH0, LEVEL[1] after TCH1, set by the frame's date, told per
+  frame like R between the two; M always bad.  The pixels not told (and M) are returned as
+  'bad': the caller lists them in the frame's BADPIX (pyrt.utils.badpix) and they keep the
+  dark they had - the error is below NSIG sigma or a star sits on them - for single-frame
+  photometry, while the stacks leave them out.
 
 Usage:
   asarina-rtspix -o rtspix-020-1x1-1062x1026.fits ~/fram-orm/images/2026*/darks/C0/*.fits
@@ -267,8 +273,39 @@ def write(path, b):
 def load(path):
     with fits.open(path) as f:
         t = f['RTS'].data
+        n = len(t)
+        names = t.columns.names
+        kind = (np.char.strip(np.asarray(t['KIND']).astype(str)) if 'KIND' in names else np.full(n, 'R'))
+        tch0 = t['TCH0'].astype(np.float64) if 'TCH0' in names else np.full(n, np.nan)
+        tch1 = t['TCH1'].astype(np.float64) if 'TCH1' in names else np.full(n, np.nan)
         return dict(x=t['X'].astype(int), y=t['Y'].astype(int), level=t['LEVEL'].astype(np.float64),
-                    header=f[0].header)
+                    kind=kind, tch0=tch0, tch1=tch1, header=f[0].header)
+
+
+def write_table(path, header, x, y, level, kind, tch0=None, tch1=None, extra=None):
+    """A catalogue from any search: KIND R (switches, levels told per frame), S (one step:
+    LEVEL[0] before TCH0, LEVEL[1] after TCH1, MJD; between them told per frame like R),
+    M (always bad).  extra: {name: (format, array)} more columns."""
+    n = len(x)
+    lev = np.full((n, MAXLEV), np.nan, np.float32)
+    for i, l in enumerate(level):
+        l = np.asarray(l, np.float32)[:MAXLEV]
+        lev[i, :len(l)] = l
+    cols = [fits.Column('X', 'J', array=np.asarray(x, np.int32)),
+            fits.Column('Y', 'J', array=np.asarray(y, np.int32)),
+            fits.Column('NLEV', 'I', array=np.isfinite(lev).sum(1).astype(np.int16)),
+            fits.Column('LEVEL', f'{MAXLEV}E', unit='ADU/s', array=lev),
+            fits.Column('KIND', '1A', array=np.asarray(kind, 'U1')),
+            fits.Column('TCH0', 'D', unit='MJD', array=np.full(n, np.nan) if tch0 is None else np.asarray(tch0, float)),
+            fits.Column('TCH1', 'D', unit='MJD', array=np.full(n, np.nan) if tch1 is None else np.asarray(tch1, float))]
+    for k, (fmt, arr) in (extra or {}).items():
+        cols.append(fits.Column(k, fmt, array=arr))
+    t = fits.BinTableHDU.from_columns(cols, name='RTS')
+    t.header['COMMENT'] = 'X, Y: 0-based full-frame indices, data[Y, X]'
+    h = fits.Header(header)
+    h['IMAGETYP'] = ('rtspix', 'RTS (two-faced) hot pixel catalogue')
+    h['RTSNPIX'] = (n, 'catalogued pixels')
+    fits.HDUList([fits.PrimaryHDU(header=h), t]).writeto(path, overwrite=True)
 
 
 _RING = [(dy, dx) for dy in range(-2, 3) for dx in range(-2, 3) if max(abs(dy), abs(dx)) == 2 or
@@ -282,21 +319,36 @@ def _gather(img, y, x, offs):
     return np.stack([img[np.clip(y + dy, 0, ny - 1), np.clip(x + dx, 0, nx - 1)] for dy, dx in offs], axis=1)
 
 
-def fix_dark(data, dark, cat, exptime, origin=(0, 0), nsig=NSIG, sat=None):
+def fix_dark(data, dark, cat, exptime, origin=(0, 0), nsig=NSIG, sat=None, mjd=None):
     """The dark with each catalogued RTS pixel at the level the frame shows it in.
 
     data, dark: the raw frame and its dark (same shape; a window of the full frame starting
-    at origin = (row, col)); exptime: the frame's total exposure [s].
+    at origin = (row, col)); exptime: the frame's total exposure [s]; mjd: the frame's time,
+    for the KIND S pixels (one step: the level of the frame's side of it; told per frame like
+    an R pixel when the frame falls between TCH0 and TCH1, or without mjd).
     Returns (dark', dict(n=pixels in frame, fixed=, unknown=, state=level index or -1 per
-    catalogued pixel in frame))."""
+    catalogued pixel in frame, bad=(y, x) frame indices of the pixels whose dark is not known:
+    R and S not told, M - for the frame's BADPIX))."""
     y = cat['y'] - origin[0]
     x = cat['x'] - origin[1]
     ny, nx = data.shape
     inside = (y >= 2) & (y < ny - 2) & (x >= 2) & (x < nx - 2)
     y, x, lev = y[inside], x[inside], cat['level'][inside]
+    n_all = len(cat['x'])
+    kind = np.asarray(cat.get('kind', np.full(n_all, 'R')))[inside]
+    tch0 = np.asarray(cat.get('tch0', np.full(n_all, np.nan)))[inside]
+    tch1 = np.asarray(cat.get('tch1', np.full(n_all, np.nan)))[inside]
     out = dark.astype(np.float64, copy=True)
     if len(y) == 0:
-        return out, dict(n=0, fixed=0, unknown=0, state=np.zeros(0, int))
+        return out, dict(n=0, fixed=0, unknown=0, state=np.zeros(0, int), bad=(y, x))
+    # S pixels with the frame clearly on one side of the step: the level by the date
+    dated = np.zeros(len(y), bool); dk = np.zeros(len(y), int)
+    if mjd is not None:
+        s = kind == 'S'
+        before = s & (mjd < tch0); after = s & (mjd > tch1)
+        dated = before | after
+        dk = np.where(after, 1, 0)
+    masked = kind == 'M'
     r = data.astype(np.float64) - dark
     rring = _gather(r, y, x, _OUTER)
     bg = np.median(rring, axis=1)
@@ -316,10 +368,13 @@ def fix_dark(data, dark, cat, exptime, origin=(0, 0), nsig=NSIG, sat=None):
     P = np.arange(len(y))
     gap_ = np.abs(exp_[P, k1] - exp_[P, k2])
     gap_ = np.where(np.isfinite(gap_), gap_, 0)
-    good = (~star) & (gap_ > nsig * sig) & (dist[P, k1] < 0.5 * gap_ - 2 * sig)
+    good = (~star) & (gap_ > nsig * sig) & (dist[P, k1] < 0.5 * gap_ - 2 * sig) & ~masked
+    k1 = np.where(dated, dk, k1)
+    good = (good | dated) & ~masked
     out[y[good], x[good]] = dring[good] + exp_[P[good], k1[good]]
     state = np.where(good, k1, -1)
-    return out, dict(n=len(y), fixed=int(good.sum()), unknown=int((~good).sum()), state=state)
+    return out, dict(n=len(y), fixed=int(good.sum()), unknown=int((~good).sum()), state=state,
+                     bad=(y[~good], x[~good]))
 
 
 # ---------------------------------------------------------------------------- CLI
