@@ -447,6 +447,10 @@ def main():
     from asarina.config import pre_parse, load_config, as_argparse_defaults, filter_terms, SYSTEM_CONFIG_FILE, USER_CONFIG_FILE
 
     config_file, camera, remaining = pre_parse()
+    if config_file:
+        # the kinseries runner and its steps (kinstep, framestep) start from here: the same
+        # config for their filter terms, not the default cascade (FRAM-ORM C0 got D50's [C0])
+        os.environ['ASARINA_CONFIG'] = os.path.abspath(os.path.expanduser(config_file))
     cfg = load_config(config_file, camera)
     defaults = as_argparse_defaults(cfg)
 
@@ -809,8 +813,11 @@ def main():
         if ecsv_path is not None and (args.realtime or args.kinseries_queue) and args.kinseries_dir:
             try:
                 from asarina.pipeline.kinseries import queue_job
+                # the frame as pyrt-dophot left it (dft.fits: its refitted WCS, the one in the
+                # ECSV); the solver's plain TAN of df.fits puts report cutouts off by pixels
+                dft = temp_dir / fits_file.replace('df.fits', 'dft.fits')
                 job = queue_job(args.kinseries_dir, raw_header, raw_path, ecsv_path,
-                                calibrated=calibrated, frames=args.kinseries_frames,
+                                calibrated=dft if dft.exists() else calibrated, frames=args.kinseries_frames,
                                 max_exptime=args.kinseries_max_exptime)
                 if job:
                     logger.info(f"Kinetic series queued: {job}")

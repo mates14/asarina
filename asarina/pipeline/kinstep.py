@@ -379,7 +379,7 @@ def merge_terms(terms, fterms):
 def config_filter_terms(hdr):
     try:
         from asarina.config import load_config, filter_terms
-        cfg = load_config(None, hdr.get('CCD_NAME'))
+        cfg = load_config(os.environ.get('ASARINA_CONFIG'), hdr.get('CCD_NAME'))   # imgproc's --config
         return filter_terms(cfg).get(str(hdr.get('FILTER', '')).lower(), '')
     except Exception as e:
         log.warning(f"cannot read the asarina config: {e}")

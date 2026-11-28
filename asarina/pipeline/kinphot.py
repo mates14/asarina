@@ -395,7 +395,7 @@ def do_series(arg, args):
     if fterms is None:
         try:
             from asarina.config import load_config, filter_terms
-            cfg = load_config(None, raw_hdr.get('CCD_NAME'))
+            cfg = load_config(os.environ.get('ASARINA_CONFIG'), raw_hdr.get('CCD_NAME'))   # imgproc's --config
             fterms = filter_terms(cfg).get(str(raw_hdr.get('FILTER', '')).lower(), '')
         except Exception as e:
             log.warning(f"{stem}: cannot read asarina config: {e}")
