@@ -50,6 +50,8 @@ TELEGRAM_CONFIG = os.environ.get('TRIGREPORT_TELEGRAM_CONFIG', '~/gcn/config.jso
 TELEGRAM_CHAT = os.environ.get('TRIGREPORT_TELEGRAM_CHAT', 'private_chat_id')   # key in config.json 'telegram'
 ERRATIC_ZVAR = 10.0     # an ERRATIC source inside the box this significant and
 ERRATIC_MARGIN = 2.0    # [mag] this far above the limit is 'likely'
+HIGH_AIRMASS = 2.5      # from here on red stars brighten against a calibration made higher up
+                        # (FRAM-ORM 101827, X 3.8: five 'FLARE's 0.5-1 mag over quiescence)
 SCHEMA = 4          # report.json layout (2: fit, error parts, points, conditions, ids; 3: fit chi2_ndf, moon_illum/alt, repeatability floor;
                     # 4: candidates' lightcurve_steps, limits_steps)
 N_CAND = 5          # candidates in the record
@@ -499,8 +501,15 @@ def build(obs):
         # inside the box, uncatalogued, bright and strongly variable without order: an afterglow
         # with flares (GRB 250702F at D50, 19 sigma, 3.7 mag above the limit), not noise
         status = 'likely'
+    caution = []
+    x = step_info[-1].get('airmass') if step_info else None
+    if x is not None and x >= HIGH_AIRMASS:
+        caution.append(f"high airmass ({x:.1f}): the colour of the extinction is not calibrated, "
+                       "red stars look brighter than their catalogue magnitudes")
+        if status == 'likely' and best['cls'] == 'FLARE':
+            status = 'candidate'
 
-    rec = dict(schema=SCHEMA, units=dict(t='s since T0 (bin middle)', alpha='m = M + 2.5 alpha log10(t - T0), > 0 fading',
+    rec = dict(caution=caution, schema=SCHEMA, units=dict(t='s since T0 (bin middle)', alpha='m = M + 2.5 alpha log10(t - T0), > 0 fading',
                                            rate='mag/h, linear fit', margin='median bin limit - mean mag',
                                            cont='normalised light-curve length, 1 = noise, < 0.6 ordered',
                                            extrap='+dt min after the last point: [mag, total error]',
@@ -578,7 +587,7 @@ def plot_lc(rec, stepdir, path):
 
     # the magnitude range follows the best candidate (all its steps' points, its quiescence, its
     # extrapolation); other candidates and the limits are drawn only where they fall into it
-    window, times, cand_handles = None, [], []
+    window, times, cand_handles, offs = None, [], [], []
     for i, (c, col) in enumerate(zip(rec['candidates'][:N_PLOT], colours)):
         per_step = [(k, arr(lc)) for k, lc in (c.get('lightcurve_steps') or [[last, c['lightcurve']]])]
         per_step = [(k, lc) for k, lc in per_step if len(lc)]
@@ -603,8 +612,11 @@ def plot_lc(rec, stepdir, path):
             pad = max(0.1, 0.1 * (hi - lo), (0.4 - (hi - lo)) / 2)
             window = (lo - pad, hi + pad)
         elif not (window[0] <= np.median(allp[:, 1]) <= window[1]):
-            cand_handles.append(Line2D([], [], ls='none', marker='o', ms=5, color=col, alpha=0.4,
-                                       label=f"{label} (off scale, {np.median(allp[:, 1]):.1f})"))
+            # far brighter or fainter than the best one: in the panel below, relative to its
+            # quiescence (the catalogue's for a flare, else its own median)
+            ref = quiet if quiet is not None else float(np.median(allp[:, 1]))
+            offs.append((per_step, ref, col))
+            cand_handles.append(Line2D([], [], ls='-', lw=6, color=col, label=f"{label} (below, {ref:.1f} + Δ)"))
             continue
         cand_handles.append(Line2D([], [], ls='-', lw=6, color=col, label=label))
         for k, lc in per_step:
@@ -639,7 +651,24 @@ def plot_lc(rec, stepdir, path):
             ax.xaxis.set_minor_formatter(NullFormatter())
         ax.xaxis.set_major_formatter(ScalarFormatter())
     ax.invert_yaxis()
-    ax.set_xlabel('time since trigger [s]' if rec['trigger'] else 'time since the first frame [s]')
+    xax = ax
+    if offs:
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+        xax = make_axes_locatable(ax).append_axes('bottom', size='40%', pad=0.1, sharex=ax)
+        ax.tick_params(labelbottom=False)
+        xax.axhline(0, ls='--', lw=1, color='grey', alpha=0.7)
+        for per_step, ref, col in offs:
+            for k, lc in per_step:
+                filled = k == last
+                xax.errorbar(lc[:, 0], lc[:, 1] - ref, yerr=lc[:, 2], fmt=mk.get(k, 'o'), ms=5 if filled else 4.5,
+                             color=col, mfc=col if filled else 'none', alpha=1.0 if filled else 0.7,
+                             elinewidth=1 if filled else 0.7, capsize=0)
+        xax.invert_yaxis()
+        if times and min(times) > 0:
+            ax.set_xlim(min(times) / 1.03, max(times) * 1.03)
+        xax.set_ylabel('Δmag', fontsize=9)
+        xax.grid(alpha=0.3, which='both')
+    xax.set_xlabel('time since trigger [s]' if rec['trigger'] else 'time since the first frame [s]')
     ax.set_ylabel(f"magnitude ({rec['filter']}, calibrated to r)" if rec['filter'] in ('N', 'clear') else 'magnitude')
     t = rec['trigger']['name'] if rec['trigger'] else rec['object']
     ax.set_title(f"{rec['site']} {t}, steps {steps[0]}..{last}" if len(steps) > 1 else f"{rec['site']} {t}, step {last}")
@@ -771,7 +800,8 @@ def gcn_text(rec):
     lines = [f"TITLE: {tname}: {rec['site']} optical observations", "",
              "[authors] report:", ""]
     lines.append(f"We observed the field of {tname} with {tel}, starting {st['t_first']:.0f} s after the trigger "
-                 f"({how}).  The sum of the frames to T0+{st['t_last']:.0f} s reaches "
+                 f"({how}" + (f", airmass {st['airmass']:.1f}" if st.get('airmass') else '') + ").  "
+                 f"The sum of the frames to T0+{st['t_last']:.0f} s reaches "
                  f"{band} ~ {st['deep_limit']}.")
     best = rec['best']
     lines.append("")
@@ -815,6 +845,10 @@ def gcn_text(rec):
     return "\n".join(lines)
 
 
+def _na(v):
+    return '' if v is None else f"{v:g}"
+
+
 def page(rec):
     e = html.escape
     tr = rec['trigger']
@@ -834,7 +868,8 @@ def page(rec):
                     f"<td>{e(ex)}</td><td>{(str(c['dist_arcmin']) + chr(39)) if c.get('dist_arcmin') is not None else ''}</td>"
                     f"<td>{c['score']}</td></tr>")
     srows = ''.join(f"<tr><td>{s['step']}</td><td>{s['bins']}</td><td>{s['bin_seconds']}</td>"
-                    f"<td>{s['t_first']:.0f}–{s['t_last']:.0f}</td><td>{s['bin_limit']}</td><td>{s['deep_limit']}</td></tr>"
+                    f"<td>{s['t_first']:.0f}–{s['t_last']:.0f}</td><td>{s['bin_limit']}</td><td>{s['deep_limit']}</td>"
+                    f"<td>{_na(s.get('airmass'))}</td><td>{_na(s.get('fwhm_arcsec'))}</td></tr>"
                     for s in rec['steps'])
     trig = (f"T0 {e(str(tr['t0']))}, {tr['ra']:.4f} {tr['dec']:+.4f}, error box {tr['errorbox_arcmin']}'"
             if tr else "no trigger information")
@@ -856,10 +891,11 @@ pre {{ white-space:pre-wrap; border:1px solid var(--line); padding:8px; font-siz
 <h1>{e(title)}</h1>
 <div class="mut">{e(rec['object'])} · {trig} · updated {e(rec['updated'])} UT · step {rec['step']}</div>
 <p class="status">{e({'nothing': 'Nothing new near the trigger.' if rec['candidates'] else 'Nothing new found.', 'candidate': 'Candidate(s), unconfirmed.', 'likely': 'Likely counterpart.'}[rec['status']])}</p>
+{''.join(f'<p class="status">Caution: {e(c)}.</p>' for c in rec.get('caution', []))}
 <div class="imgs"><img src="lc.png" alt="light curve"><img src="chart.png" alt="finding chart"></div>
 <h2>Candidates</h2><div class="wrap"><table><tr><th>#</th><th>class</th><th>RA Dec (J2000)</th><th>mag</th><th>trend</th><th>expected</th><th>dist</th><th>S</th></tr>{''.join(rows) or '<tr><td colspan=8>none</td></tr>'}</table></div>
 {'<h2>Cutouts</h2><p class="mut">' + str(CUT) + "' square, the trigger position and every candidate: the deep image, then single frames across the step (each scaled on its own; north is roughly up).</p><div class=wrap><img src=cutouts.png alt=cutouts style='max-width:none'></div>" if rec.get('cutouts') else ''}
-<h2>Steps</h2><div class="wrap"><table><tr><th>step</th><th>bins</th><th>bin [s]</th><th>T-T0 [s]</th><th>bin limit</th><th>deep limit</th></tr>{srows}</table></div>
+<h2>Steps</h2><div class="wrap"><table><tr><th>step</th><th>bins</th><th>bin [s]</th><th>T-T0 [s]</th><th>bin limit</th><th>deep limit</th><th>airmass</th><th>FWHM ["]</th></tr>{srows}</table></div>
 <h2>Draft GCN</h2><pre>{e(gcn_text(rec))}</pre>
 <p class="mut"><a href="report.json">report.json</a> · asarina-kinseries / pyrt transients</p>
 </body></html>
@@ -942,7 +978,8 @@ def message(rec, previous):
             f"{mag:.2f} mag ({_trend(best)}){ex}"
             + (f", {best['dist_arcmin']}' from the trigger" if best.get('dist_arcmin') is not None else '')
             + f". Step {rec['step']}, T0+{st['t_last']:.0f} s, deep limit {st['deep_limit']}. "
-            f"{REPORT_URL}/{rec['name']}/")
+            + ''.join(f"Caution: {c}. " for c in rec.get('caution', []))
+            + f"{REPORT_URL}/{rec['name']}/")
 
 
 def send_telegram(text, chat_key=TELEGRAM_CHAT):
