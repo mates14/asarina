@@ -15,7 +15,8 @@ the next kinetic series starts it again.
 The runner groups the jobs by observation (OBSID, filter; C1 and C2 of SBT together).
 Frames of different exposures (FRAM: a 20 s fast block, then 60 s) share one light curve
 in bins of equal summed exposure (framestep.exposure_bins): a step runs on the longest
-prefix of the frames that splits into 12 such bins exactly.
+prefix of the frames that splits into 12 such bins exactly, using as much of a leading block
+of other exposures as fits (frame_starts).
 Kinetic series: with n series in, it runs the newest "trivial" step k <= n not done yet
 (k = 1, 2, 3, 4, 6, 12, see kinstep.py).  Frames: with n frames in, step k = n // 12
 (12 bins of k frames).  A step that has gone stale while an earlier one was running is
@@ -56,7 +57,11 @@ log = logging.getLogger("kinseries")
 
 TRIVIAL = (1, 2, 3, 4, 6, 12)
 POINTS = 12
-MAX_FRAME_STEP = 12   # frames: up to 12 x 12 frames (12 min of SBT 5 s frames)
+MAX_FRAME_STEP = 12   # frames: up to 12 x 12 frames (12 min of SBT 5 s frames); framestep's
+                      # cube mode held the step's whole cube (~60 MB per SBT frame); with
+                      # --mode combine (bins by pyrt-combine) the ladder can go on
+FRAME_LADDER = (1, 2, 3, 5, 8, 12, 18, 26, 40, 60)   # frames per bin, ~1.5^n: a step costs ~its
+                      # frames, so with the linear 1..12 long series spent hours on steps 9-12
 # Long frames (FRAM: 60 s + ~10 s overhead) would make the first light curve wait for
 # 12 frames, a quarter of an hour.  From EARLY_EXPTIME up, a step 0 runs on the first
 # EARLY_FRAMES frames as they are (EARLY_FRAMES points), then the usual 12 bins of k.
@@ -186,31 +191,54 @@ def raw_ready(job):
 
 # ---------------------------------------------------------------- steps
 
+def frame_starts(exps, state):
+    """Where a frame step may start: from the last step's start (0 before any) up to the start
+    of the last run of one exposure time.  A leading block of other exposures (FRAM: 20 x 20 s,
+    then 60 s) is used from its rear edge as far as it fills whole bins together with what
+    follows: 18 x 20 s + 6 x 60 s in 60 s bins, 18 x 20 + 18 x 60 s in 120 s bins, 12 x 20 +
+    44 x 60 s in 240 s bins, ..., rather than not at all.  The start never moves back."""
+    lo = state.get('first', 0)
+    tail = len(exps) - 1
+    while tail > 0 and exps[tail - 1] == exps[-1]:
+        tail -= 1
+    return list(range(lo, max(lo, tail) + 1))
+
+
 def due_frame_step(series, state):
     """Frames: (step number, first frame, end frame, points) of the step to run now, or None.
     The longest prefix past the last step's that splits into POINTS bins of equal summed
-    exposure (equal exposures: 12, 24, 36, ... frames; 12 x 20 s + 8 x 60 s splits too),
-    at most MAX_FRAME_STEP x POINTS frames.  Before the first such step, frames of
-    EARLY_EXPTIME and more get step 0: the first EARLY_FRAMES of them, one point each."""
+    exposure longer than the last step's bins (equal exposures: 12, 24, 36, ... frames;
+    12 x 20 s + 8 x 60 s splits too), at most MAX_FRAME_STEP x POINTS frames, from the
+    earliest start frame_starts allows.
+    Before the first such step, frames of EARLY_EXPTIME and more get step 0: the first
+    EARLY_FRAMES of them, one point each."""
     from asarina.pipeline.framestep import exposure_bins
     done = state.get('done', []) + state.get('failed', [])
     last_n = state.get('last_n', 0)
     exps = [j.get('exptime', 0.0) for j in series]
-    # the start: the first frame, or - when a leading block of other exposures can never
-    # split evenly with what follows (5 x 20 s, then 60 s) - the start of the last run of
-    # one exposure time; once a step has started somewhere, stay there
-    starts = [state['first']] if 'first' in state else [0]
-    if 'first' not in state and exps:
-        tail = len(exps) - 1
-        while tail > 0 and exps[tail - 1] == exps[-1]:
-            tail -= 1
-        if tail > 0:
-            starts.append(tail)
-    for s0 in starts:
-        for n in range(min(len(series), s0 + MAX_FRAME_STEP * POINTS), max(last_n, s0), -1):
-            if exposure_bins(exps[s0:n], POINTS) is not None:
-                return max(done, default=0) + 1, s0, n, POINTS
-    for s0 in starts:
+    starts = frame_starts(exps, state)
+    # each step's bins are longer than the last one's: the start moves only to grow them
+    prev = sum(exps[starts[0]:last_n]) / POINTS if last_n else 0.0
+    # the step's size: the largest rung of FRAME_LADDER above the last step's with rung x POINTS
+    # frames in (rungs the runner fell behind on are skipped), the longest prefix of at most
+    # that many frames that splits evenly
+    span = -(-(last_n - starts[0]) // POINTS) if last_n and max(done, default=0) > 0 else 0   # not step 0
+    last_k = min([k for k in FRAME_LADDER if k >= span], default=FRAME_LADDER[-1]) if span else 0
+    for k in reversed([k for k in FRAME_LADDER
+                       if last_k < k <= MAX_FRAME_STEP and len(series) - starts[0] >= k * POINTS]):
+        best = None   # the most frames, then the newest
+        for n in range(len(series), max(last_n, starts[0]), -1):
+            for s0 in starts:
+                if n - s0 < POINTS:
+                    break
+                if n - s0 <= k * POINTS and (best is None or (n - s0, n) > best[0]) \
+                        and sum(exps[s0:n]) / POINTS > prev * 1.01 \
+                        and exposure_bins(exps[s0:n], POINTS) is not None:
+                    best = ((n - s0, n), s0, n)
+        if best:
+            return max(done, default=0) + 1, best[1], best[2], POINTS
+    early = [starts[0]] + ([starts[-1]] if 'first' not in state and starts[-1] > starts[0] else [])
+    for s0 in early:
         if not done and len(exps) > s0 and exps[s0] >= EARLY_EXPTIME and len(series) >= s0 + EARLY_FRAMES \
                 and exposure_bins(exps[s0:s0 + EARLY_FRAMES], EARLY_FRAMES) is not None:
             return 0, s0, s0 + EARLY_FRAMES, EARLY_FRAMES
@@ -240,7 +268,8 @@ def run_step(obs, series, k, args, state=None, spath=None, nframes=None, points=
     if series[0].get('kind') == 'frame':
         use = series[first:nframes]
         cmd = [sys.executable, '-m', 'asarina.pipeline.framestep', '--points', str(points), '--label', str(k),
-               '-j', str(args.jobs), '-o', out] + [f"{j['fits']}:{j['ecsv']}" for j in use]
+               '-j', str(args.jobs), '--skel', os.path.join(obs, 'skel.hdr'),   # one grid per observation
+               '-o', out] + [f"{j['fits']}:{j['ecsv']}" for j in use]
         cams = '+'.join(sorted(set(str(j['ccd']) for j in use)))
         exps = '+'.join(f"{e:g}" for e in sorted(set(j.get('exptime', 0) for j in use)))
         log.info(f"{os.path.basename(obs)}: step {k} ({len(use)} frames {cams}, {exps} s, "
@@ -354,6 +383,8 @@ def serve(root, args):
             # over: the copies of the calibrated frames go (4 MB each, ~150 per trigger)
             for f in glob.glob(os.path.join(obs, 'step[0-9][0-9]', 'deep.fits')):
                 os.remove(f)
+            if os.path.isdir(os.path.join(obs, 'proj')):   # framestep's projection cache
+                shutil.rmtree(os.path.join(obs, 'proj'), ignore_errors=True)
             if os.path.isdir(os.path.join(obs, 'frames')):
                 shutil.rmtree(os.path.join(obs, 'frames'), ignore_errors=True)
                 log.info(f"{os.path.basename(obs)}: over, calibrated frames removed")
